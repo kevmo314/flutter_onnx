@@ -15,6 +15,7 @@ import numpy as np
 from onnx.backend.test.case.node import collect_testcases
 from verify_models import exchange
 import verify_supplemental
+from freeze_dft import stored_datasets
 
 
 def check_staged_model(model):
@@ -125,6 +126,13 @@ def assess(
                     continue
                 record = results[node.op_type]
                 try:
+                    # ONNX regenerates expected FFT values with the host NumPy.
+                    # Send the identical upstream vectors to each target.
+                    datasets = (
+                        stored_datasets(case)
+                        if node.op_type == "DFT"
+                        else case.data_sets
+                    )
                     imported = next(o for o in model.opset_import if o.domain == "")
                     legacy_scan = node.op_type == "Scan" and imported.version <= 8
                     if imported.version != 28:
@@ -152,7 +160,6 @@ def assess(
                             raise
                         except Exception as error:
                             distributions[case.name] = str(error)
-                    datasets = case.data_sets
                     if legacy_scan and not node.input[0]:
                         # The official Scan-8 adapter removes the leading batch
                         # axis from the graph. Apply that change to every batch
@@ -201,7 +208,7 @@ def assess(
                 except TimeoutError:
                     raise
                 except Exception as exc:
-                    if verbose:
+                    if verbose or node.op_type != "Bernoulli":
                         print(case.name, str(exc), flush=True)
                     reason = str(exc).strip().splitlines()
                     record[case.name] = (reason[0] if reason else type(exc).__name__)[

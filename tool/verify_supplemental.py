@@ -3,6 +3,8 @@
 import base64
 import shutil
 import numpy as np
+import onnx
+from onnx import helper
 from generate_supplemental import models
 from verify_models import exchange
 
@@ -24,7 +26,48 @@ OPERATORS = {
 }
 
 
+def check_fourier(proc, folder):
+    rng = np.random.default_rng(314)
+    for dtype, tensor_type in (
+        (np.float32, onnx.TensorProto.FLOAT),
+        (np.float64, onnx.TensorProto.DOUBLE),
+    ):
+        info = lambda name: helper.make_tensor_value_info(name, tensor_type, [None, 2])
+        for inverse in (False, True):
+            model = helper.make_model(
+                helper.make_graph(
+                    [helper.make_node("DFT", ["x"], ["y"], inverse=int(inverse))],
+                    "complex_fourier",
+                    [info("x")],
+                    [info("y")],
+                ),
+                opset_imports=[helper.make_opsetid("", 28)],
+                ir_version=14,
+            )
+            onnx.checker.check_model(model, full_check=True)
+            path = folder / f"fourier-{tensor_type}-{inverse}.onnx"
+            onnx.save(model, path)
+            for length in (1, 5, 10, 16):
+                x = rng.normal(size=(length, 2)).astype(dtype)
+                z = x[:, 0].astype(np.complex128) + 1j * x[:, 1].astype(np.float64)
+                y = np.fft.ifft(z) if inverse else np.fft.fft(z)
+                expected = np.stack((y.real, y.imag), axis=1).astype(dtype)
+                tolerance = 2e-6 if dtype == np.float32 else 1e-12
+                exchange(
+                    proc,
+                    folder,
+                    path,
+                    {"x": x},
+                    {"y": expected},
+                    predictions=False,
+                    rtol=tolerance,
+                    atol=tolerance,
+                )
+
+
 def check(proc, folder):
+    check_fourier(proc, folder)
+
     def model(name):
         path = folder / (name + "-additional.onnx")
         path.write_bytes(base64.b64decode(models[name]))
