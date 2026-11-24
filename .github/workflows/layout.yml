@@ -1,5 +1,8 @@
 name: Profile Accelerate matrix layouts
-on: [workflow_dispatch]
+on:
+  push:
+    paths: ['layout.c', '.github/workflows/layout.yml']
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:

@@ -71,6 +71,37 @@ static void compare(int f,int k,int t,int b,int gelu) {
     for(int i=0;i<f*t*b;i++)err=fmax(err,fabs(ref[i]-out[i]));
     printf("TILE %d %d %d %d gelu=%d vector=%d threads=%d ms=%.3f error=%.9g\n",f,k,t,b,gelu,fast,workers,times[3],err);
   }
+  float *nativeW=malloc(4*f*k),*xt=malloc(4*b*t*k),*yt=malloc(4*b*t*f),*bias=malloc(4*f);
+  for(int j=0;j<f;j++) {bias[j]=.34f; for(int d=0;d<k;d++)nativeW[j*k+d]=w[d*f+j];}
+  for(int nt=1;nt<=2;nt++){
+    BNNSLayerParametersFullyConnected fc = {
+      .i_desc={.layout=BNNSDataLayoutVector,.data_type=BNNSDataTypeFloat32,.size={k}},
+      .o_desc={.layout=BNNSDataLayoutVector,.data_type=BNNSDataTypeFloat32,.size={f}},
+      .bias={.layout=BNNSDataLayoutVector,.data_type=BNNSDataTypeFloat32,.size={f},.data=bias},
+      .w_desc={.layout=BNNSDataLayoutRowMajorMatrix,.data_type=BNNSDataTypeFloat32,.size={k,f},.data=nativeW},
+      .activation={.function=BNNSActivationFunctionIdentity}
+    };
+    BNNSFilterParameters params={.n_threads=nt};
+    BNNSFilter filter=BNNSFilterCreateLayerFullyConnected(&fc,&params);
+    if(!filter){puts("FC creation failed");continue;}
+    double durations[7];
+    for(int r=0;r<7;r++) {
+      double start=now();
+      for(int j=0;j<20;j++) {
+        for(int z=0;z<b*t;z++)for(int d=0;d<k;d++)xt[z*k+d]=x[d*p+z];
+        if(BNNSFilterApplyBatch(filter,b*t,xt,k,yt,f))abort();
+        for(int v=0;v<b;v++) for(int h=0;h<f;h++)for(int z=0;z<t;z++)
+          out[(v*f+h)*t+z]=yt[(v*t+z)*f+h];
+        if(gelu)activate(out,b*t*f,1);
+      }
+      durations[r]=(now()-start)*50;
+    }
+    for(int i=0;i<7;i++)for(int k=i+1;k<7;k++)if(durations[k]<durations[i]){double a=durations[i];durations[i]=durations[k];durations[k]=a;}
+    double err=0;for(int i=0;i<b*t*f;i++)err=fmax(err,fabs(out[i]-ref[i]));
+    printf("FC %d %d %d %d gelu=%d threads=%d ms=%.3f error=%.9g\n",f,k,t,b,gelu,nt,durations[3],err);
+    BNNSFilterDestroy(filter);
+  }
+  free(nativeW);free(xt);free(yt);free(bias);
   free(w);free(x);free(out);free(prod);free(ref);
 }
 int main(void) {
