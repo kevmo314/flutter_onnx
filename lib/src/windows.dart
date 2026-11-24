@@ -201,12 +201,30 @@ Future<Tensor?> _accelerateConv1d(
   if (x.type != TensorType.float32 ||
       w.type != x.type ||
       x.shape.length != 3 ||
-      w.shape.length != 3 ||
-      node.integer('group', 1) != 1 ||
-      w.shape[1] != x.shape[1]) return null;
+      w.shape.length != 3) return null;
   final [batch, channels, width] = x.shape;
   final [filters, _, taps] = w.shape;
   final win = _Window(node, [width], [taps]);
+  final group = node.integer('group', 1);
+  if (group != 1) {
+    if (backend is ChannelwiseBackend &&
+        group == channels &&
+        filters == channels &&
+        w.shape[1] == 1 &&
+        taps > 1 &&
+        win.stride.single == 1 &&
+        win.pads.every((p) => p == 0) &&
+        win.output.single > 0) {
+      final data = backend.depthwiseValid(x, w, bias, win.dilation.single);
+      if (data != null) {
+        final y = Tensor._(x.type, [batch, filters, win.output.single],
+            data.asUnmodifiableView());
+        return node.op == _pointwiseGelu ? _expandedGeluTensor(y) : y;
+      }
+    }
+    return null;
+  }
+  if (w.shape[1] != channels) return null;
   final columns = win.output.single, inner = channels * taps;
   if (batch == 0 || filters == 0 || inner == 0 || columns == 0) return null;
   final source = x.values as Float32List, weights = w.values as Float32List;

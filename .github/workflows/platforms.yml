@@ -39,6 +39,14 @@ jobs:
           python -I test/playback_reference.py "$RUNNER_TEMP/reference.py" "$model" "$RUNNER_TEMP/playback"
           "$RUNNER_TEMP/speech-cli/bundle/bin/supertonic_reference" --playback "$RUNNER_TEMP/playback" > "$RUNNER_TEMP/playback.log"
           cat "$RUNNER_TEMP/playback.log"
+          python - "$RUNNER_TEMP/playback.log" <<'PYTHON'
+          import json, sys
+          with open(sys.argv[1]) as report:
+              rows = [json.loads(line) for line in report if line.startswith("{")]
+          warm = [r for r in rows if "rtf" in r and r["round"] > 1]
+          if len(warm) != 2 or any(not 0 < r["rtf"] < 1 for r in warm):
+              raise SystemExit(f"Warm synthesis exceeded the real-time budget: {warm}")
+          PYTHON
       - uses: actions/upload-artifact@v4
         with:
           name: playback-profile-${{ matrix.os }}

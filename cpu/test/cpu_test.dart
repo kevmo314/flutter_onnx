@@ -138,6 +138,64 @@ void main() {
       }
     },
   );
+  test(
+    'channel normalization preserves visible intermediates and frame tails',
+    () async {
+      final feeds = {
+        'x': Tensor.float32([
+          2,
+          4,
+          13,
+        ], List.generate(104, (i) => (i % 17) / 7)),
+        's': Tensor.float32([4], [1, 0.5, 2, -1]),
+        'b': Tensor.float32([4], [-0.5, 0, 0.75, 4]),
+      };
+      for (final expose in [false, true]) {
+        final graph = OnnxSession.fromBytes(
+          base64Decode(
+            expose
+                ? 'CA46mAIKJAoBeBIDbmxjIglUcmFuc3Bvc2UqDwoEcGVybUAAQAJAAaABBwpNCgNubGMKAXMKAWISA3lsbiISTGF5ZXJOb3JtYWxpemF0aW9uKhQKBGF4aXMY////////////AaABAioRCgdlcHNpbG9uFazFJzegAQEKJAoDeWxuEgF5IglUcmFuc3Bvc2UqDwoEcGVybUAAQAJAAaABBxIMY2hhbm5lbCBub3JtWhcKAXgSEgoQCAESDAoCCAIKAggECgIIDVoPCgFzEgoKCAgBEgQKAggEWg8KAWISCgoICAESBAoCCARiFwoBeRISChAIARIMCgIIAgoCCAQKAggNYhkKA25sYxISChAIARIMCgIIAgoCCA0KAggEQgQKABAS'
+                : 'CA46/QEKJAoBeBIDbmxjIglUcmFuc3Bvc2UqDwoEcGVybUAAQAJAAaABBwpNCgNubGMKAXMKAWISA3lsbiISTGF5ZXJOb3JtYWxpemF0aW9uKhQKBGF4aXMY////////////AaABAioRCgdlcHNpbG9uFazFJzegAQEKJAoDeWxuEgF5IglUcmFuc3Bvc2UqDwoEcGVybUAAQAJAAaABBxIMY2hhbm5lbCBub3JtWhcKAXgSEgoQCAESDAoCCAIKAggECgIIDVoPCgFzEgoKCAgBEgQKAggEWg8KAWISCgoICAESBAoCCARiFwoBeRISChAIARIMCgIIAgoCCAQKAggNQgQKABAS',
+          ),
+        );
+        final expected = graph.run(feeds), nodes = <String>[];
+        final outputs = await graph.runAsync(
+          feeds,
+          backend: backend,
+          onAccelerated: nodes.add,
+        );
+        expect(nodes, hasLength(expose ? 0 : 1));
+        for (final key in expected.keys) {
+          expect(outputs[key]!.values, expected[key]!.values);
+        }
+      }
+    },
+  );
+
+  test(
+    'native depthwise valid convolution handles dilation and optional bias',
+    () {
+      final x = Tensor.float32([2, 3, 9], List.generate(54, (i) => i % 13 - 6));
+      final w = Tensor.float32([3, 1, 3], List.generate(9, (i) => i - 4));
+      for (final bias in [
+        null,
+        Tensor.float32([3], [0.5, 1, -2]),
+      ]) {
+        final y = backend.depthwiseValid(x, w, bias, 2);
+        expect(y, [
+          for (var row = 0; row < 6; row++)
+            for (var t = 0; t < 5; t++)
+              (bias?.values[row % 3] ?? 0) +
+                  List.generate(
+                    3,
+                    (k) =>
+                        x.values[row * 9 + t + 2 * k] *
+                        w.values[(row % 3) * 3 + k],
+                  ).reduce((a, b) => a + b),
+        ]);
+      }
+    },
+  );
   test('batched strided dilated convolution agrees with scalar sums', () async {
     final graph = OnnxSession.fromBytes(
       base64Decode(

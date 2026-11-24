@@ -93,6 +93,58 @@ external int _pointwise(
   int threads,
 );
 
+@Native<
+  Void Function(
+    Pointer<Float>,
+    Pointer<Float>,
+    Pointer<Float>,
+    Pointer<Float>,
+    Int32,
+    Int32,
+    Int32,
+    Int32,
+    Double,
+  )
+>(symbol: 'onnx_channel_norm', isLeaf: true)
+external void _normalize(
+  Pointer<Float> x,
+  Pointer<Float> scale,
+  Pointer<Float> bias,
+  Pointer<Float> y,
+  int channels,
+  int width,
+  int first,
+  int end,
+  double epsilon,
+);
+
+@Native<
+  Void Function(
+    Pointer<Float>,
+    Pointer<Float>,
+    Pointer<Float>,
+    Pointer<Float>,
+    Int32,
+    Int32,
+    Int32,
+    Int32,
+    Int32,
+    Int32,
+  )
+>(symbol: 'onnx_depthwise_valid', isLeaf: true)
+external void _depthwise(
+  Pointer<Float> x,
+  Pointer<Float> w,
+  Pointer<Float> bias,
+  Pointer<Float> y,
+  int channels,
+  int width,
+  int taps,
+  int dilation,
+  int first,
+  int end,
+);
+
 class _PackedFilters implements Finalizable {
   static final _free = NativeFinalizer(malloc.nativeFree);
   final Pointer<Float> data;
@@ -134,7 +186,7 @@ class _PackedFilters implements Finalizable {
 }
 
 /// Dense CPU products for inference isolates. Apple devices use Accelerate.
-class NativeCpuBackend implements PointwiseConvBackend {
+class NativeCpuBackend implements ChannelwiseBackend {
   /// Upper bound on native workers for large Android and Linux products.
   /// Apple Accelerate schedules its own workers.
   final int maxThreads;
@@ -275,6 +327,126 @@ class NativeCpuBackend implements PointwiseConvBackend {
         return null;
       return Float32List.fromList(y.asTypedList(size));
     }, malloc);
+  }
+
+  @override
+  Float32List? normalizeChannels(
+    Tensor input,
+    Tensor scale,
+    Tensor? bias,
+    double epsilon,
+  ) {
+    if (input.type != TensorType.float32 || input.shape.length != 3)
+      return null;
+    final [batch, channels, width] = input.shape;
+    bool vector(Tensor t) =>
+        t.type == input.type && t.shape.length == 1 && t.length == channels;
+    if (!vector(scale) ||
+        (bias != null && !vector(bias)) ||
+        channels == 0 ||
+        input.length > 0x7fffffff)
+      return null;
+    final data = input.values as Float32List, out = Float32List(data.length);
+    final weights = scale.values as Float32List,
+        offsets = bias?.values as Float32List?;
+    final frames = math.max(8, (131072 ~/ channels) & ~7);
+    for (var b = 0; b < batch; b++) {
+      final start = b * channels * width;
+      final x = Float32List.sublistView(data, start, start + channels * width);
+      final y = Float32List.sublistView(out, start, start + channels * width);
+      for (var t = 0; t < width; t += frames) {
+        final end = math.min(width, t + frames);
+        if (offsets == null) {
+          _normalize(
+            x.address,
+            weights.address,
+            nullptr,
+            y.address,
+            channels,
+            width,
+            t,
+            end,
+            epsilon,
+          );
+        } else {
+          _normalize(
+            x.address,
+            weights.address,
+            offsets.address,
+            y.address,
+            channels,
+            width,
+            t,
+            end,
+            epsilon,
+          );
+        }
+      }
+    }
+    return out;
+  }
+
+  @override
+  Float32List? depthwiseValid(
+    Tensor input,
+    Tensor weights,
+    Tensor? bias,
+    int dilation,
+  ) {
+    if (input.type != TensorType.float32 ||
+        weights.type != input.type ||
+        input.shape.length != 3 ||
+        weights.shape.length != 3 ||
+        dilation <= 0)
+      return null;
+    final [batch, channels, width] = input.shape;
+    final taps = weights.shape[2], output = width - (taps - 1) * dilation;
+    if (weights.shape[0] != channels ||
+        weights.shape[1] != 1 ||
+        taps <= 1 ||
+        output <= 0 ||
+        input.length > 0x7fffffff ||
+        weights.length > 0x7fffffff ||
+        (bias != null &&
+            (bias.type != input.type ||
+                bias.shape.length != 1 ||
+                bias.length != channels)))
+      return null;
+    final x = input.values as Float32List, w = weights.values as Float32List;
+    final offsets = bias?.values as Float32List?,
+        y = Float32List(batch * channels * output);
+    final tile = math.max(1, 131072 ~/ (output * taps));
+    for (var row = 0; row < batch * channels; row += tile) {
+      final end = math.min(batch * channels, row + tile);
+      if (offsets == null) {
+        _depthwise(
+          x.address,
+          w.address,
+          nullptr,
+          y.address,
+          channels,
+          width,
+          taps,
+          dilation,
+          row,
+          end,
+        );
+      } else {
+        _depthwise(
+          x.address,
+          w.address,
+          offsets.address,
+          y.address,
+          channels,
+          width,
+          taps,
+          dilation,
+          row,
+          end,
+        );
+      }
+    }
+    return y;
   }
 
   @override

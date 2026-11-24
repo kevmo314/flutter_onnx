@@ -104,6 +104,11 @@ static void *run_job(void *arg) {
 
 EXPORT int onnx_pointwise_run(const float *x, const float *weights, float *y,
                             int batch, int channels, int width, int filters, int gelu, int threads) {
+  // Classifier-free guidance can duplicate a latent across the batch before
+  // conditioning. Only reuse a product for bit-identical input samples.
+  const int repeated = batch == 2 &&
+      memcmp(x, x + (size_t)channels * width, (size_t)channels * width * sizeof(float)) == 0;
+  if (repeated) batch = 1;
 #ifdef __APPLE__
   const float *bias = weights + (size_t)filters * channels;
   for (int b = 0; b < batch; ++b) {
@@ -117,7 +122,6 @@ EXPORT int onnx_pointwise_run(const float *x, const float *weights, float *y,
       }
   }
   (void)threads;
-  return 1;
 #elif defined(__linux__) && (defined(__GNUC__) || defined(__clang__))
   const int frames = batch * width;
   const size_t padded = ((size_t)frames + frames_per_tile-1) / frames_per_tile * frames_per_tile;
@@ -151,8 +155,9 @@ EXPORT int onnx_pointwise_run(const float *x, const float *weights, float *y,
   }
   for (int i = 0; i < threads; ++i) if (started[i]) pthread_join(workers[i], NULL);
   free(packed);
-  return 1;
 #else
   return 0;
 #endif
+  if (repeated) memcpy(y + (size_t)filters * width, y, (size_t)filters * width * sizeof(float));
+  return 1;
 }

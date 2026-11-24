@@ -81,6 +81,8 @@ class OnnxSession {
   final Map<String, int> _uses;
   late final List<_Node> _pointwiseNodes =
       _fusePointwiseGelu(_nodes, outputs, _uses);
+  late final List<_Node> _channelwiseNodes =
+      _fuseChannelNorm(_pointwiseNodes, outputs, _uses);
   final Set<String> _captures;
   OnnxSession._(this.opset, this.inputs, this.outputs, this._weights,
       this._nodes, this._uses, this._captures);
@@ -208,19 +210,31 @@ class OnnxSession {
       void Function(String node)? onAccelerated}) async {
     if (backend == null) return run(feeds);
     final frame = _Frame(this, feeds, {});
-    final plan = backend is PointwiseConvBackend ? _pointwiseNodes : _nodes;
+    final plan = backend is ChannelwiseBackend
+        ? _channelwiseNodes
+        : backend is PointwiseConvBackend
+            ? _pointwiseNodes
+            : _nodes;
     for (final node in plan) {
       final args = frame.args(node);
       final product = (node.op == 'MatMul' ||
               node.op == 'Gemm' ||
               node.op == _rowProduct ||
               node.op == 'Conv' ||
+              node.op == _channelNorm ||
               node.op == _pointwiseGelu)
           ? await _tryAccelerate(node, args.cast<Tensor?>(), backend)
           : null;
       if (product != null) onAccelerated?.call(node.label);
       if (product != null) {
         frame.store(node, [product]);
+      } else if (node.op == _channelNorm) {
+        final tensors = args.cast<Tensor?>();
+        final nlc = _transpose(tensors[0]!, [0, 2, 1]);
+        final normalized = _normalize(node, [nlc, ...tensors.skip(1)]).first;
+        frame.store(node, [
+          _transpose(normalized, [0, 2, 1])
+        ]);
       } else if (node.op == _pointwiseGelu) {
         final conv =
             _Node('Conv', node.label, node.outputs, node.inputs, node.attrs);
@@ -250,6 +264,53 @@ abstract interface class MatMulBackend {
 abstract interface class PointwiseConvBackend implements MatMulBackend {
   Future<Float32List?> pointwise(Tensor input, Tensor weights, Tensor? bias,
       {required bool gelu});
+}
+
+/// Optional native primitives for channel-first, one-dimensional models.
+/// Implementations may decline a tensor or layout by returning null.
+abstract interface class ChannelwiseBackend implements PointwiseConvBackend {
+  Float32List? normalizeChannels(
+      Tensor input, Tensor scale, Tensor? bias, double epsilon);
+  Float32List? depthwiseValid(
+      Tensor input, Tensor weights, Tensor? bias, int dilation);
+}
+
+const _channelNorm = '#ChannelNormalization';
+List<_Node> _fuseChannelNorm(
+    List<_Node> nodes, Map<String, TensorInfo> outputs, Map<String, int> uses) {
+  final private = {
+    for (final n in nodes)
+      if (n.function == null &&
+          n.outputs.length == 1 &&
+          uses[n.outputs.single] == 1 &&
+          !outputs.containsKey(n.outputs.single))
+        n.outputs.single: n
+  };
+  bool swap(_Node? n) =>
+      n != null &&
+      n.function == null &&
+      n.op == 'Transpose' &&
+      _sameShape(n.ints('perm') ?? [], [0, 2, 1]);
+  final removed = <_Node>{}, replacements = <_Node, _Node>{};
+  for (final end in nodes) {
+    if (!swap(end)) continue;
+    final norm = private[end.inputs.single];
+    if (norm == null ||
+        norm.op != 'LayerNormalization' ||
+        ![-1, 2].contains(norm.integer('axis', -1))) continue;
+    final begin = private[norm.inputs.first];
+    if (!swap(begin) || removed.contains(begin)) continue;
+    // A transpose ending one normalization may also start the next one.
+    // Leave overlapping matches to the original plan.
+    if (replacements.containsKey(begin)) continue;
+    removed.addAll([begin!, norm]);
+    replacements[end] = _Node(_channelNorm, norm.label, end.outputs,
+        [begin.inputs.single, ...norm.inputs.skip(1)], norm.attrs);
+  }
+  return [
+    for (final n in nodes)
+      if (!removed.contains(n)) replacements[n] ?? n
+  ];
 }
 
 const _pointwiseGelu = '#PointwiseGelu';
@@ -282,6 +343,14 @@ List<_Node> _fusePointwiseGelu(
 
 Future<Tensor?> _tryAccelerate(
     _Node node, List<Tensor?> args, MatMulBackend backend) async {
+  if (node.op == _channelNorm && backend is ChannelwiseBackend) {
+    final x = args[0]!;
+    final data = backend.normalizeChannels(
+        x, args[1]!, args.elementAtOrNull(2), node.real('epsilon', 1e-5));
+    return data == null
+        ? null
+        : Tensor._(x.type, x.shape, data.asUnmodifiableView());
+  }
   if (node.op == 'Conv' || node.op == _pointwiseGelu) {
     return _accelerateConv1d(node, args, backend);
   }
