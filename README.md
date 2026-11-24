@@ -4,14 +4,10 @@ Load an ONNX graph once and run it locally on Flutter web, Android, or iOS. The 
 
 ## Install
 
-Add the core package to your application's `pubspec.yaml`. To enable device acceleration, also add the companion package from the same revision.
+For CPU and device execution, add the companion package to your application's `pubspec.yaml`. It resolves and exports the core API from the same Git revision.
 
 ```yaml
 dependencies:
-  flutter_onnx:
-    git:
-      url: https://github.com/kevmo314/flutter_onnx.git
-      ref: main
   flutter_onnx_accelerators:
     git:
       url: https://github.com/kevmo314/flutter_onnx.git
@@ -26,7 +22,6 @@ Copy the included model from [example/assets/xor.onnx](example/assets/xor.onnx) 
 
 ```dart
 import 'package:flutter/services.dart';
-import 'package:flutter_onnx/flutter_onnx.dart';
 import 'package:flutter_onnx_accelerators/flutter_onnx_accelerators.dart';
 
 Future<void> predict() async {
@@ -45,7 +40,7 @@ Future<void> predict() async {
 }
 ```
 
-For CPU-only use, depend on `flutter_onnx` alone and call `session.run(inputs)`. Reuse the session and backend across predictions. Inspect `session.inputs` and `session.outputs` for names, element types and declared dimensions. Named symbolic dimensions bind independently on each call.
+For CPU-only use, install the core package with `flutter pub add flutter_onnx --git-url https://github.com/kevmo314/flutter_onnx.git`, import `package:flutter_onnx/flutter_onnx.dart` and call `session.run(inputs)`. Reuse the session and backend across predictions. Inspect `session.inputs` and `session.outputs` for names, element types and declared dimensions. Named symbolic dimensions bind independently on each call.
 
 ## Device kernels
 

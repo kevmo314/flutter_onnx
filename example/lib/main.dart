@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_onnx/flutter_onnx.dart';
 import 'package:flutter_onnx_accelerators/flutter_onnx_accelerators.dart';
 
 void main() => runApp(const MaterialApp(home: XorExample()));

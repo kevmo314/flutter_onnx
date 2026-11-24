@@ -7,8 +7,6 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_onnx:
-    path: ..
   flutter_onnx_accelerators:
     path: ../accelerators
 dev_dependencies:
