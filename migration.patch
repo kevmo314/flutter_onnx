@@ -1,0 +1,2616 @@
+diff --git a/.github/scripts/download-supertonic.sh b/.github/scripts/download-supertonic.sh
+new file mode 100644
+index 0000000..25c3fbc
+--- /dev/null
++++ b/.github/scripts/download-supertonic.sh
+@@ -0,0 +1,57 @@
++#!/usr/bin/env bash
++# Fetch the original files pinned by the bundled voice-pack catalog.
++set -euo pipefail
++version=$1
++dir=$2
++case "$version" in
++  2) revision=75e6727618a02f323c720cba9478152d4bc16ca4 ;;
++  3) revision=3cadd1ee6394adea1bd021217a0e650ede09a323 ;;
++  *) exit 2 ;;
++esac
++mkdir -p "$dir/onnx" "$dir/voice_styles"
++manifest() {
++  if [[ "$version" == 2 ]]; then
++    cat <<'EOF'
++6d556b3691165c364be91dc0bd894656b5949f5acd2750d8ec2f954010845011  onnx/duration_predictor.onnx
++dd5f535ed629f7df86071043e15f541ce1b2ab7f1bdbce4c7892b307bca79fa3  onnx/text_encoder.onnx
++ee531d9af9b80438a2ed703e22155ee6c83b12595ab22fd3bb6de94c7502fe96  onnx/tts.json
++b7662a73a0703f43b97c0f2e089f8e8325e26f5d841aca393b5a54c509c92df1  onnx/unicode_indexer.json
++105e9d66fd8756876b210a6b4aa03fc393b1eaca3a8dadcc8d9a3bc785c86a35  onnx/vector_estimator.onnx
++19bd51f47a186069c752403518a40f7ea4c647455056d2511f7249691ecddf7c  onnx/vocoder.onnx
++6106950ebeb8a5da29ea22075f605db659cd07dbc288a68292543d9129aa250f  voice_styles/F1.json
++8b97feb16d79ac0447136796708feac5f83dbabe92a5be1168212653c38729ae  voice_styles/F2.json
++7eda5bccb4e6eb7f228fa182462d5fcf982d77628234603599027f0734d70c29  voice_styles/F3.json
++e056fc2bee393edc8bff761eb28f33fb461e8dad828c3b05348a010ac1b7bb79  voice_styles/F4.json
++ce7645ad7e3c13cca04e0d62bf890ef9ac401988005ba8f5e9c9b59257bc6931  voice_styles/F5.json
++a04c823cbda6dd1c7de131ec68fea83bbb70d7f29d61623304eb871e3b83b5a1  voice_styles/M1.json
++7ddd07bf873a3fd67d09ef4e8293b486beb658158b47e371166198e4c6926072  voice_styles/M2.json
++e8e77a56459e4dc8cdfeb88e6f778dc9a0adf22e1184414f4b0e82a5d1edbe72  voice_styles/M3.json
++95322725e4d25d9ed4e7dcccbf0f3726b0e9a2471d876b7942373218dbd30174  voice_styles/M4.json
++be52f82327da63ff18481ce2dd8060c7df432e0168d748745ef3e21b92d706a5  voice_styles/M5.json
++EOF
++  else
++    cat <<'EOF'
++c3eb91414d5ff8a7a239b7fe9e34e7e2bf8a8140d8375ffb14718b1c639325db  onnx/duration_predictor.onnx
++c7befd5ea8c3119769e8a6c1486c4edc6a3bc8365c67621c881bbb774b9902ff  onnx/text_encoder.onnx
++42078d3aef1cd43ab43021f3c54f47d2d75ceb4e75f627f118890128b06a0d09  onnx/tts.json
++9bf7346e43883a81f8645c81224f786d43c5b57f3641f6e7671a7d6c493cb24f  onnx/unicode_indexer.json
++883ac868ea0275ef0e991524dc64f16b3c0376efd7c320af6b53f5b780d7c61c  onnx/vector_estimator.onnx
++085de76dd8e8d5836d6ca66826601f615939218f90e519f70ee8a36ed2a4c4ba  onnx/vocoder.onnx
++bbdec6ee00231c2c742ad05483df5334cab3b52fda3ba38e6a07059c4563dbc2  voice_styles/F1.json
++7c722c6a72707b1a77f035d67f0d1351ba187738e06f7683e8c72b1df3477fc6  voice_styles/F2.json
++12f6ef2573baa2defa1128069cb59f203e3ab67c92af77b42df8a0e3a2f7c6ab  voice_styles/F3.json
++c2fa764c1225a76dfc3e2c73e8aa4f70d9ee48793860eb34c295fff01c2e032b  voice_styles/F4.json
++45966e73316415626cf41a7d1c6f3b4c70dbc1ba2bee5c1978ef0ce33244fc8d  voice_styles/F5.json
++e35604687f5d23694b8e91593a93eec0e4eca6c0b02bb8ed69139ab2ea6b0a5b  voice_styles/M1.json
++b76cbf62bac707c710cf0ae5aba5e31eea1a6339a9734bfae33ab98499534a50  voice_styles/M2.json
++ea1ac35ccb91b0d7ecad533a2fbd0eec10c91513d8951e3b25fbba99954e159b  voice_styles/M3.json
++ca8eefad4fcd989c9379032ff3e50738adc547eeb5e221b82593a6d7b3bac303  voice_styles/M4.json
++dd22b92740314321f8ae11c5e87f8dd60d060f15dd3a632b5adf77f471f77af2  voice_styles/M5.json
++EOF
++  fi
++}
++while read -r sha file; do
++  if [[ -f "$dir/$file" ]] && echo "$sha  $dir/$file" | shasum -a 256 -c - >/dev/null; then continue; fi
++  curl -fsSL --retry 3 "https://huggingface.co/Supertone/supertonic-$version/resolve/$revision/$file" -o "$dir/$file"
++  echo "$sha  $dir/$file" | shasum -a 256 -c -
++done < <(manifest)
+diff --git a/.github/scripts/test-supertonic-device.sh b/.github/scripts/test-supertonic-device.sh
+new file mode 100644
+index 0000000..0148b53
+--- /dev/null
++++ b/.github/scripts/test-supertonic-device.sh
+@@ -0,0 +1,27 @@
++#!/usr/bin/env bash
++set -euo pipefail
++model="$MODEL_DIR"
++reference="$RUNNER_TEMP/reference"
++if [[ "$1" == android ]]; then
++  device=$(adb get-serialno)
++  flutter build apk --debug
++  adb install -r build/app/outputs/flutter-apk/app-debug.apk
++  for pair in "$model|model" "$reference|reference"; do
++    src=${pair%|*}
++    dest=${pair##*|}
++    adb shell run-as com.rtirl.chat mkdir -p "files/$dest"
++    tar -C "$src" -cf - . | adb shell -T run-as com.rtirl.chat tar -xf - -C "files/$dest"
++  done
++  model=/data/user/0/com.rtirl.chat/files/model
++  reference=/data/user/0/com.rtirl.chat/files/reference
++else
++  device=$(xcrun simctl list devices available -j | python3 -c '
++import json, sys
++devices = json.load(sys.stdin)["devices"]
++print(next(d["udid"] for r in sorted(devices, reverse=True) if "iOS" in r for d in devices[r] if d["name"].startswith("iPhone")))')
++  xcrun simctl boot "$device" || xcrun simctl bootstatus "$device" -b
++  xcrun simctl bootstatus "$device" -b
++fi
++flutter test integration_test/on_device_tts_test.dart -d "$device" --reporter expanded \
++  --dart-define=ON_DEVICE_TTS_MODEL_DIR="$model" \
++  --dart-define=ON_DEVICE_TTS_REFERENCE_DIR="$reference"
+diff --git a/.github/workflows/on-device-tts-ios.yml b/.github/workflows/on-device-tts-ios.yml
+index 2a93a30..d97449b 100644
+--- a/.github/workflows/on-device-tts-ios.yml
++++ b/.github/workflows/on-device-tts-ios.yml
+@@ -1,7 +1,7 @@
+-name: on_device_tts iOS
++name: Supertonic speech
+ 
+-# Runs the plugin's Swift tests (the OnDeviceTtsCore Swift package) on the
+-# iOS simulator, with real Supertonic 3 synthesis through ONNX Runtime.
++# The Swift unit suite uses a reference evaluator. The Flutter device suite
++# exercises the production graph worker and the native speech pipeline.
+ 
+ on:
+   push:
+@@ -9,11 +9,23 @@ on:
+       - main
+     paths:
+       - "packages/on_device_tts/**"
++      - "android/**"
++      - "ios/**"
++      - "pubspec.yaml"
++      - "pubspec.lock"
+       - ".github/workflows/on-device-tts-ios.yml"
++      - ".github/scripts/*supertonic*.sh"
++      - "integration_test/on_device_tts_test.dart"
+   pull_request:
+     paths:
+       - "packages/on_device_tts/**"
++      - "android/**"
++      - "ios/**"
++      - "pubspec.yaml"
++      - "pubspec.lock"
+       - ".github/workflows/on-device-tts-ios.yml"
++      - ".github/scripts/*supertonic*.sh"
++      - "integration_test/on_device_tts_test.dart"
+   workflow_dispatch:
+ 
+ concurrency:
+@@ -32,40 +44,11 @@ jobs:
+     steps:
+       - uses: actions/checkout@v7
+ 
+-      - name: Cache the Supertonic 3 model
+-        id: model-cache
+-        uses: actions/cache@v6
++      - uses: actions/cache@v6
+         with:
+           path: ${{ env.MODEL_DIR }}
+           key: supertonic-3-${{ env.SUPERTONIC_REVISION }}
+-
+-      - name: Download the Supertonic 3 model
+-        if: steps.model-cache.outputs.cache-hit != 'true'
+-        run: |
+-          set -euo pipefail
+-          mkdir -p "$MODEL_DIR/onnx" "$MODEL_DIR/voice_styles"
+-          base="https://huggingface.co/Supertone/supertonic-3/resolve/$SUPERTONIC_REVISION"
+-          while read -r sha file; do
+-            curl -fsSL --retry 3 "$base/$file" -o "$MODEL_DIR/$file"
+-            echo "$sha  $MODEL_DIR/$file" | shasum -a 256 -c -
+-          done <<'EOF'
+-          c3eb91414d5ff8a7a239b7fe9e34e7e2bf8a8140d8375ffb14718b1c639325db onnx/duration_predictor.onnx
+-          c7befd5ea8c3119769e8a6c1486c4edc6a3bc8365c67621c881bbb774b9902ff onnx/text_encoder.onnx
+-          42078d3aef1cd43ab43021f3c54f47d2d75ceb4e75f627f118890128b06a0d09 onnx/tts.json
+-          9bf7346e43883a81f8645c81224f786d43c5b57f3641f6e7671a7d6c493cb24f onnx/unicode_indexer.json
+-          883ac868ea0275ef0e991524dc64f16b3c0376efd7c320af6b53f5b780d7c61c onnx/vector_estimator.onnx
+-          085de76dd8e8d5836d6ca66826601f615939218f90e519f70ee8a36ed2a4c4ba onnx/vocoder.onnx
+-          bbdec6ee00231c2c742ad05483df5334cab3b52fda3ba38e6a07059c4563dbc2 voice_styles/F1.json
+-          7c722c6a72707b1a77f035d67f0d1351ba187738e06f7683e8c72b1df3477fc6 voice_styles/F2.json
+-          12f6ef2573baa2defa1128069cb59f203e3ab67c92af77b42df8a0e3a2f7c6ab voice_styles/F3.json
+-          c2fa764c1225a76dfc3e2c73e8aa4f70d9ee48793860eb34c295fff01c2e032b voice_styles/F4.json
+-          45966e73316415626cf41a7d1c6f3b4c70dbc1ba2bee5c1978ef0ce33244fc8d voice_styles/F5.json
+-          e35604687f5d23694b8e91593a93eec0e4eca6c0b02bb8ed69139ab2ea6b0a5b voice_styles/M1.json
+-          b76cbf62bac707c710cf0ae5aba5e31eea1a6339a9734bfae33ab98499534a50 voice_styles/M2.json
+-          ea1ac35ccb91b0d7ecad533a2fbd0eec10c91513d8951e3b25fbba99954e159b voice_styles/M3.json
+-          ca8eefad4fcd989c9379032ff3e50738adc547eeb5e221b82593a6d7b3bac303 voice_styles/M4.json
+-          dd22b92740314321f8ae11c5e87f8dd60d060f15dd3a632b5adf77f471f77af2 voice_styles/M5.json
+-          EOF
++      - run: bash .github/scripts/download-supertonic.sh 3 "$MODEL_DIR"
+ 
+       - name: Resolve the Swift package
+         working-directory: packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore
+@@ -97,14 +80,12 @@ jobs:
+           TEST_RUNNER_SUPERTONIC_MODEL_DIR="$MODEL_DIR" xcodebuild test \
+             -scheme OnDeviceTtsCore -configuration Debug \
+             -destination "id=$SIMULATOR" -parallel-testing-enabled NO \
+-            -skip-testing:OnDeviceTtsCoreTests/BenchmarkTests \
+             > "$RUNNER_TEMP/xctest.log" 2>&1 || status=$?
+           grep -E "^(Test (Case|Suite)|PARITY|SYNTH|SPEAK|STOP|on_device_tts:)|error:|\*\* " "$RUNNER_TEMP/xctest.log" || true
+           if [ "$status" != 0 ]; then
+             tail -n 200 "$RUNNER_TEMP/xctest.log"
+             exit "$status"
+           fi
+-          # Only the benchmark may be skipped: everything else needs the model.
+           if grep -E "Test Case .* skipped" "$RUNNER_TEMP/xctest.log"; then
+             echo "::error::tests were skipped"
+             exit 1
+@@ -116,24 +97,80 @@ jobs:
+             echo '```'
+           } >> "$GITHUB_STEP_SUMMARY"
+ 
+-      - name: Benchmark the execution providers
+-        continue-on-error: true
+-        working-directory: packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore
+-        run: |
+-          echo '### Execution providers (iOS simulator on a macOS runner, not a device)' >> "$GITHUB_STEP_SUMMARY"
+-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+-          for provider in cpu coreml xnnpack; do
+-            TEST_RUNNER_SUPERTONIC_MODEL_DIR="$MODEL_DIR" TEST_RUNNER_SUPERTONIC_BENCHMARK="$provider" \
+-              xcodebuild test -scheme OnDeviceTtsCore -configuration Debug \
+-              -destination "id=$SIMULATOR" -parallel-testing-enabled NO \
+-              -only-testing:OnDeviceTtsCoreTests/BenchmarkTests > "$RUNNER_TEMP/bench-$provider.log" 2>&1 \
+-              || echo "BENCH provider=$provider failed (exit $?)"
+-            grep -E "^BENCH|on_device_tts:" "$RUNNER_TEMP/bench-$provider.log" || true
+-          done | tee -a "$GITHUB_STEP_SUMMARY"
+-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+-
+       - uses: actions/upload-artifact@v7
+         if: always()
+         with:
+           name: xctest-logs
+           path: ${{ runner.temp }}/*.log
++
++  speech:
++    strategy:
++      fail-fast: false
++      matrix:
++        os: [ubuntu-latest, macos-15]
++    runs-on: ${{ matrix.os }}
++    timeout-minutes: 90
++    steps:
++      - uses: actions/checkout@v7
++      - uses: subosito/flutter-action@v2
++        with:
++          channel: stable
++          cache: true
++      - uses: actions/setup-python@v6
++        with:
++          python-version: "3.12"
++      - run: python -m pip install supertonic==1.3.1
++      - run: flutter pub get
++      - run: flutter pub get
++        working-directory: packages/on_device_tts
++      - uses: actions/cache@v6
++        with:
++          path: ${{ env.MODEL_DIR }}
++          key: supertonic-3-${{ env.SUPERTONIC_REVISION }}
++      - name: Prepare reference PCM for the default pack
++        run: |
++          bash .github/scripts/download-supertonic.sh 3 "$MODEL_DIR"
++          python -I packages/on_device_tts/tool/supertonic_reference.py "$MODEL_DIR" "$RUNNER_TEMP/reference"
++      - name: Run plugin tests with the default voice pack
++        if: runner.os == 'Linux'
++        working-directory: packages/on_device_tts
++        run: SUPERTONIC_PARITY_DIR="$RUNNER_TEMP/reference" flutter test
++      - name: Compare the smaller voice pack through the Flutter worker
++        if: runner.os == 'Linux'
++        run: |
++          bash .github/scripts/download-supertonic.sh 2 "$RUNNER_TEMP/supertonic-2"
++          python -I packages/on_device_tts/tool/supertonic_reference.py "$RUNNER_TEMP/supertonic-2" "$RUNNER_TEMP/reference2"
++          cd packages/on_device_tts
++          SUPERTONIC_PARITY_DIR="$RUNNER_TEMP/reference2" flutter test test/graph_worker_test.dart
++      - uses: actions/setup-java@v6
++        if: runner.os == 'Linux'
++        with:
++          distribution: zulu
++          java-version: "21"
++      - uses: gradle/actions/setup-gradle@v6
++        if: runner.os == 'Linux'
++      - name: Run Kotlin parity tests against the Python tensors
++        if: runner.os == 'Linux'
++        run: |
++          flutter build apk --config-only
++          cd android
++          SUPERTONIC_PARITY_DIR="$RUNNER_TEMP/reference" ./gradlew :on_device_tts:testDebugUnitTest --console=plain
++      - name: Enable KVM
++        if: runner.os == 'Linux'
++        run: |
++          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
++          sudo udevadm control --reload-rules
++          sudo udevadm trigger --name-match=kvm
++      - name: Run real-model playback and PCM checks on Android
++        if: runner.os == 'Linux'
++        uses: reactivecircus/android-emulator-runner@v2
++        with:
++          api-level: 35
++          arch: x86_64
++          target: google_apis
++          ram-size: 4096M
++          disk-size: 8192M
++          script: bash .github/scripts/test-supertonic-device.sh android
++      - name: Run real-model playback and PCM checks on iOS
++        if: runner.os == 'macOS'
++        run: bash .github/scripts/test-supertonic-device.sh ios
+diff --git a/integration_test/on_device_tts_test.dart b/integration_test/on_device_tts_test.dart
+index a92a152..c62b9c8 100644
+--- a/integration_test/on_device_tts_test.dart
++++ b/integration_test/on_device_tts_test.dart
+@@ -1,4 +1,4 @@
+-// Runs the on_device_tts native ONNX Runtime engine on a device with a real
++// Runs the on_device_tts flutter_onnx speech engine on a device with a real
+ // Supertonic 3 model. It skips itself unless ON_DEVICE_TTS_MODEL_DIR is set,
+ // so the regular integration run (which has no model) passes over it. See
+ // packages/on_device_tts/README.md for how to push the model and run it:
+@@ -168,10 +168,15 @@ void main() {
+ 
+   testWidgets('matches the reference implementation', (_) async {
+     final manifestFile = File('$referenceDir/manifest.json');
+-    if (referenceDir.isEmpty || !manifestFile.existsSync()) {
++    if (referenceDir.isEmpty) {
+       markTestSkipped('no SUPERTONIC_REFERENCE_DIR');
+       return;
+     }
++    expect(
++      manifestFile.existsSync(),
++      isTrue,
++      reason: 'Missing reference manifest',
++    );
+     final manifest =
+         jsonDecode(manifestFile.readAsStringSync()) as Map<String, dynamic>;
+     for (final c in manifest['cases'] as List) {
+diff --git a/integration_test/profile_playback.dart b/integration_test/profile_playback.dart
+new file mode 100644
+index 0000000..f04285f
+--- /dev/null
++++ b/integration_test/profile_playback.dart
+@@ -0,0 +1,87 @@
++// Flutter entry point for a cold and two warm runs through the native player.
++// Stage supertonic-3 in the app's Documents (iOS) or external files (Android).
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter/widgets.dart';
++import 'package:on_device_tts/on_device_tts.dart';
++import 'package:path_provider/path_provider.dart';
++
++Future<void> main() async {
++  WidgetsFlutterBinding.ensureInitialized();
++  final dir =
++      Platform.isAndroid
++          ? (await getExternalStorageDirectory())!
++          : await getApplicationDocumentsDirectory();
++  final report = File('${dir.path}/playback.jsonl');
++  await report.writeAsString('');
++  void record(Map<String, Object?> row) {
++    report.writeAsStringSync(
++      '${jsonEncode(row)}\n',
++      mode: FileMode.append,
++      flush: true,
++    );
++  }
++
++  const segments = [
++    'Daisy said,',
++    'that was the cleanest clutch I have seen all week,',
++    'GG everyone!',
++  ];
++  try {
++    final load = Stopwatch()..start();
++    final tts = await OnnxTts.load(modelDir: '${dir.path}/supertonic-3');
++    record({'load_ms': load.elapsedMilliseconds});
++    try {
++      for (var round = 1; round <= 3; round++) {
++        final id = 'profile-$round';
++        final events = tts.events.where((e) => e.utteranceId == id).take(2);
++        final received = events.toList().timeout(const Duration(minutes: 10));
++        final clock = Stopwatch()..start();
++        await tts.speak(
++          segments,
++          language: 'en',
++          voiceId: 'M2',
++          utteranceId: id,
++        );
++        final wall = clock.elapsedMilliseconds;
++        final playback = await received;
++        final first = playback.singleWhere(
++          (e) => e.type == OnnxTtsEventType.firstAudio,
++        );
++        final done = playback.singleWhere(
++          (e) => e.type == OnnxTtsEventType.done,
++        );
++        record({
++          'round': round,
++          'first_audio_ms': first.elapsed.inMilliseconds,
++          'done_ms': done.elapsed.inMilliseconds,
++          'speak_ms': wall,
++        });
++      }
++      var samples = 0;
++      var rate = 0;
++      for (final segment in segments) {
++        final audio = await tts.synthesize(
++          segment,
++          language: 'en',
++          voiceId: 'M2',
++          noiseSeed: 0,
++        );
++        samples += audio.pcm.length;
++        rate = audio.sampleRate;
++      }
++      record({
++        'samples': samples,
++        'sample_rate': rate,
++        'audio_ms': samples * 1000 / rate,
++      });
++    } finally {
++      await tts.unload();
++    }
++    record({'complete': true});
++  } catch (error, stack) {
++    record({'error': error.toString(), 'stack': stack.toString()});
++    rethrow;
++  }
++}
+diff --git a/ios/Runner.xcodeproj/project.pbxproj b/ios/Runner.xcodeproj/project.pbxproj
+index 8a769b7..b904c21 100644
+--- a/ios/Runner.xcodeproj/project.pbxproj
++++ b/ios/Runner.xcodeproj/project.pbxproj
+@@ -237,7 +237,6 @@
+ 				9705A1C41CF9048500538489 /* Embed Frameworks */,
+ 				3B06AD1E1E4923F5004D2608 /* Thin Binary */,
+ 				3719EC0CF7D8E1A8BA5C15D2 /* [firebase_crashlytics] Crashlytics Upload Symbols */,
+-				9B7206925B2F8BD11A629C05 /* Repair ONNX Runtime framework */,
+ 			);
+ 			buildRules = (
+ 			);
+@@ -397,27 +396,6 @@
+ 			shellPath = /bin/sh;
+ 			shellScript = "/bin/sh \"$FLUTTER_ROOT/packages/flutter_tools/bin/xcode_backend.sh\" build";
+ 		};
+-		9B7206925B2F8BD11A629C05 /* Repair ONNX Runtime framework */ = {
+-			isa = PBXShellScriptBuildPhase;
+-			alwaysOutOfDate = 1;
+-			buildActionMask = 2147483647;
+-			files = (
+-			);
+-			inputFileListPaths = (
+-			);
+-			inputPaths = (
+-				"$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
+-				"$(PROJECT_DIR)/tool/repair_onnx_framework.py",
+-			);
+-			name = "Repair ONNX Runtime framework";
+-			outputFileListPaths = (
+-			);
+-			outputPaths = (
+-			);
+-			runOnlyForDeploymentPostprocessing = 0;
+-			shellPath = /bin/sh;
+-			shellScript = "python3 \"$PROJECT_DIR/tool/repair_onnx_framework.py\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"\n";
+-		};
+ /* End PBXShellScriptBuildPhase section */
+ 
+ /* Begin PBXSourcesBuildPhase section */
+diff --git a/ios/tool/repair_onnx_framework.py b/ios/tool/repair_onnx_framework.py
+deleted file mode 100644
+index 563fe88..0000000
+--- a/ios/tool/repair_onnx_framework.py
++++ /dev/null
+@@ -1,76 +0,0 @@
+-#!/usr/bin/env python3
+-"""Repair the embedded ONNX Runtime wrapper before app signing.
+-
+-SPM can wrap ONNX Runtime's static binary in a dynamic framework built for
+-Runner's deployment target, while copying its original Info.plist. Repair that
+-specific mismatch and re-sign the framework.
+-"""
+-import argparse
+-import os
+-from pathlib import Path
+-import plistlib
+-import re
+-import subprocess
+-
+-
+-def version(value):
+-    parts = tuple(int(part) for part in value.split('.'))
+-    return parts + (0,) * (3 - len(parts))
+-
+-
+-def minimum_os(binary):
+-    output = subprocess.check_output(
+-        ['xcrun', 'vtool', '-show-build', str(binary)], text=True
+-    )
+-    # vtool prints minos for LC_BUILD_VERSION and version for the legacy
+-    # LC_VERSION_MIN_IPHONEOS load command, once for each architecture.
+-    # LC_BUILD_VERSION also contains a tool's version; that is not an OS target.
+-    values = []
+-    command = None
+-    for line in output.splitlines():
+-        fields = line.split()
+-        if len(fields) != 2:
+-            continue
+-        key, value = fields
+-        if key == 'cmd':
+-            command = value
+-        elif ((command == 'LC_BUILD_VERSION' and key == 'minos') or
+-              (command == 'LC_VERSION_MIN_IPHONEOS' and key == 'version')):
+-            if not re.fullmatch(r'\d+(?:\.\d+){1,2}', value):
+-                raise ValueError(f'Invalid deployment target {value} in {binary}')
+-            values.append(value)
+-    if not values:
+-        raise ValueError(f'No deployment target found in {binary}')
+-    return max(values, key=version)
+-
+-
+-def repair(app):
+-    framework = Path(app) / 'Frameworks' / 'onnxruntime.framework'
+-    if not framework.exists():
+-        return
+-    plist = framework / 'Info.plist'
+-    with plist.open('rb') as source:
+-        info = plistlib.load(source)
+-    required = minimum_os(framework / info['CFBundleExecutable'])
+-    declared = info.get('MinimumOSVersion', '0.0')
+-    if version(declared) >= version(required):
+-        return
+-    info['MinimumOSVersion'] = required
+-    with plist.open('wb') as destination:
+-        plistlib.dump(info, destination, fmt=plistlib.FMT_BINARY)
+-    if os.environ.get('CODE_SIGNING_ALLOWED') != 'NO':
+-        # CI may archive unsigned and apply distribution signing during export.
+-        identity = os.environ.get('EXPANDED_CODE_SIGN_IDENTITY') or '-'
+-        subprocess.run(
+-            ['codesign', '--force', '--sign', identity,
+-             '--preserve-metadata=identifier,entitlements,flags', str(framework)],
+-            check=True,
+-        )
+-    print(f'Updated {framework.name}: MinimumOSVersion {declared} -> {required}')
+-
+-
+-if __name__ == '__main__':
+-    parser = argparse.ArgumentParser(description=__doc__)
+-    parser.add_argument('app', type=Path)
+-    args = parser.parse_args()
+-    repair(args.app)
+diff --git a/packages/on_device_tts/README.md b/packages/on_device_tts/README.md
+index b006cb0..48fbd7e 100644
+--- a/packages/on_device_tts/README.md
++++ b/packages/on_device_tts/README.md
+@@ -3,9 +3,7 @@
+ Text-to-speech that runs on the device, behind one `TtsEngine` interface:
+ 
+ * `SystemTtsEngine`: the platform's voices, through `flutter_tts`.
+-* `OnnxTts`: neural TTS models (Supertonic 3 today) run natively on the
+-  official [ONNX Runtime](https://onnxruntime.ai) (MIT), in Kotlin on
+-  Android and in Swift on iOS.
++* `OnnxTts` runs Supertonic 2 and 3 graphs with [flutter_onnx](https://github.com/kevmo314/flutter_onnx). Kotlin and Swift handle voice styles, text processing and playback.
+ * `NeuralTtsEngine`: a `TtsEngine` that speaks with an installed voice pack
+   on `OnnxTts`.
+ 
+@@ -32,13 +30,13 @@ the previous one plays. `doc/native_contract.md` is the platform contract
+ (channels, errors, events, the exact pipeline and the noise PRNG) that the
+ Android and iOS implementations share.
+ 
+-On Android the plugin depends on `com.microsoft.onnxruntime:onnxruntime-android`
+-(pinned in `android/build.gradle.kts`), which adds its native library to
+-every ABI. On iOS the app builds the plugin with CocoaPods only, so that
+-ONNX Runtime (`onnxruntime-objc` 1.24.2, which needs iOS 15.1) is linked
+-statically: through Flutter's Swift Package Manager integration it was
+-embedded as an `onnxruntime.framework` that App Store Connect rejects
+-(ITMS-90208). `doc/ios.md` describes the iOS side.
++Each graph lives in a background Dart isolate. The native engine sends its inputs
++over `on_device_tts/graphs` and receives typed results. The duration predictor uses
++the same Dart arithmetic on both platforms to keep PCM trimming consistent.
++For the encoder, denoiser and vocoder, dense CPU products use
++the package's native kernel on Android and Accelerate on iOS. Provider and
++thread-count arguments remain accepted for existing callers. The graph worker
++uses the CPU backend for every provider request.
+ 
+ ## NeuralTtsEngine
+ 
+diff --git a/packages/on_device_tts/android/build.gradle.kts b/packages/on_device_tts/android/build.gradle.kts
+index 52603ba..f8b1436 100644
+--- a/packages/on_device_tts/android/build.gradle.kts
++++ b/packages/on_device_tts/android/build.gradle.kts
+@@ -78,19 +78,10 @@ kotlin {
+     }
+ }
+ 
+-// JVM unit tests can't load the Android build's native library, so they run
+-// against the desktop build of the same ONNX Runtime version instead.
+-configurations.matching { it.name.endsWith("UnitTestRuntimeClasspath") }.configureEach {
+-    exclude(group = "com.microsoft.onnxruntime", module = "onnxruntime-android")
+-}
+-
+ dependencies {
+-    implementation("com.microsoft.onnxruntime:onnxruntime-android:$onnxRuntimeVersion")
+-
++    // Independent oracle for the desktop JVM parity test only.
++    testImplementation("com.microsoft.onnxruntime:onnxruntime:$onnxRuntimeVersion")
+     testImplementation("org.jetbrains.kotlin:kotlin-test")
+     testImplementation("org.junit.jupiter:junit-jupiter:6.1.3")
+     testRuntimeOnly("org.junit.platform:junit-platform-launcher:6.1.3")
+-    if (System.getenv("SUPERTONIC_PARITY_DIR") != null) {
+-        testRuntimeOnly("com.microsoft.onnxruntime:onnxruntime:$onnxRuntimeVersion")
+-    }
+ }
+diff --git a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/FlutterGraphs.kt b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/FlutterGraphs.kt
+new file mode 100644
+index 0000000..ea62a6d
+--- /dev/null
++++ b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/FlutterGraphs.kt
+@@ -0,0 +1,58 @@
++package com.muxable.ondevicetts
++
++import android.os.Handler
++import android.os.Looper
++import com.muxable.ondevicetts.supertonic.GraphSession
++import com.muxable.ondevicetts.supertonic.GraphTensor
++import io.flutter.plugin.common.BinaryMessenger
++import io.flutter.plugin.common.MethodChannel
++import java.io.File
++import java.util.concurrent.CompletableFuture
++
++/** Called on loader/inference threads; Flutter messages are sent on the main thread. */
++internal class FlutterGraphs(messenger: BinaryMessenger) {
++    private val channel = MethodChannel(messenger, "on_device_tts/graphs")
++    private val main = Handler(Looper.getMainLooper())
++    private val pending = mutableSetOf<CompletableFuture<Any?>>()
++    private var detached = false
++
++    fun detach() {
++        detached = true
++        pending.forEach { it.completeExceptionally(IllegalStateException("Flutter engine detached")) }
++        pending.clear()
++    }
++
++    private fun call(method: String, args: Any): Any? {
++        check(Looper.myLooper() != Looper.getMainLooper())
++        val reply = CompletableFuture<Any?>()
++        main.post {
++            if (detached) {
++                reply.completeExceptionally(IllegalStateException("Flutter engine detached"))
++                return@post
++            }
++            pending.add(reply)
++            channel.invokeMethod(method, args, object : MethodChannel.Result {
++                override fun success(result: Any?) { pending.remove(reply); reply.complete(result) }
++                override fun error(code: String, message: String?, details: Any?) {
++                    pending.remove(reply)
++                    reply.completeExceptionally(IllegalStateException(message ?: code))
++                }
++                override fun notImplemented() = error("unavailable", "Missing Dart graph handler", null)
++            })
++        }
++        return reply.get()
++    }
++
++    fun open(file: File): GraphSession {
++        val id = call("open", file.absolutePath) as Number
++        return object : GraphSession {
++            override fun run(inputs: Map<String, GraphTensor>): GraphTensor {
++                val tensors = inputs.mapValues { (_, t) -> mapOf("shape" to t.shape.toList(), "data" to t.data) }
++                val out = call("run", mapOf("id" to id, "inputs" to tensors)) as Map<*, *>
++                val shape = (out["shape"] as List<*>).map { (it as Number).toLong() }.toLongArray()
++                return GraphTensor(out["data"] as FloatArray, shape)
++            }
++            override fun close() { main.post { if (!detached) channel.invokeMethod("close", id) } }
++        }
++    }
++}
+diff --git a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/OnDeviceTtsPlugin.kt b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/OnDeviceTtsPlugin.kt
+index f1a0119..32618a4 100644
+--- a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/OnDeviceTtsPlugin.kt
++++ b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/OnDeviceTtsPlugin.kt
+@@ -40,7 +40,7 @@ class OnDeviceTtsPlugin : FlutterPlugin {
+             acquire = { wakeLock.acquire(it) },
+             release = { if (wakeLock.isHeld) wakeLock.release() },
+         )
+-        val handler = OnnxTtsChannelHandler(activity)
++        val handler = OnnxTtsChannelHandler(activity, FlutterGraphs(binding.binaryMessenger))
+         val context = binding.applicationContext
+         methods = MethodChannel(binding.binaryMessenger, OnnxTtsChannelHandler.METHOD_CHANNEL).also {
+             it.setMethodCallHandler { call, result ->
+diff --git a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/OnnxTtsChannelHandler.kt b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/OnnxTtsChannelHandler.kt
+index 30d67db..2dc1dfa 100644
+--- a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/OnnxTtsChannelHandler.kt
++++ b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/OnnxTtsChannelHandler.kt
+@@ -1,15 +1,11 @@
+ package com.muxable.ondevicetts
+ 
+-import ai.onnxruntime.OrtEnvironment
+-import ai.onnxruntime.OrtSession
+ import android.os.Handler
+ import android.os.Looper
+ import android.os.Process
+ import android.os.SystemClock
+ import android.util.Log
+-import com.muxable.ondevicetts.supertonic.ExecutionProviders
+ import com.muxable.ondevicetts.supertonic.NoiseGenerator
+-import com.muxable.ondevicetts.supertonic.SessionSettings
+ import com.muxable.ondevicetts.supertonic.SupertonicLanguages
+ import com.muxable.ondevicetts.supertonic.SupertonicLoadException
+ import com.muxable.ondevicetts.supertonic.SupertonicModel
+@@ -37,6 +33,7 @@ import java.util.concurrent.atomic.AtomicInteger
+  */
+ internal class OnnxTtsChannelHandler(
+     private val activity: ActivityLock,
++    private val graphs: FlutterGraphs,
+ ) : MethodChannel.MethodCallHandler, EventChannel.StreamHandler {
+     companion object {
+         const val METHOD_CHANNEL = "on_device_tts/onnx"
+@@ -45,15 +42,10 @@ internal class OnnxTtsChannelHandler(
+     }
+ 
+     private val main = Handler(Looper.getMainLooper())
+-    private val env: OrtEnvironment by lazy { OrtEnvironment.getEnvironment() }
+     private val models = ConcurrentHashMap<String, SupertonicModel>()
+     private val nextHandle = AtomicInteger(1)
+     private val random = SecureRandom()
+ 
+-    // ONNX Runtime starts a session's intra-op threads on the thread that
+-    // creates it, and threads inherit its priority: loading at background
+-    // priority would leave half of every inference at background priority,
+-    // which a busy foreground app (e.g. the streaming app) starves.
+     private val loader = executor("on_device_tts-load", Process.THREAD_PRIORITY_DEFAULT)
+     private val synthesis = executor("on_device_tts-synth", Process.THREAD_PRIORITY_DEFAULT)
+ 
+@@ -93,6 +85,7 @@ internal class OnnxTtsChannelHandler(
+     }
+ 
+     fun dispose() {
++        graphs.detach()
+         stop()
+         sink = null
+         synthesis.execute {
+@@ -108,7 +101,6 @@ internal class OnnxTtsChannelHandler(
+         val modelType = call.string("modelType")
+         val modelDir = call.string("modelDir")
+         val numThreads = call.int("numThreads") ?: 2
+-        val provider = call.argument<String>("provider") ?: ExecutionProviders.CPU
+         if (modelType != "supertonic") {
+             result.error("load_failed", "Unknown model type: $modelType", null)
+             return
+@@ -118,14 +110,12 @@ internal class OnnxTtsChannelHandler(
+         loader.execute {
+             try {
+                 val started = SystemClock.elapsedRealtime()
+-                val model = SupertonicModel.load(
+-                    env, File(modelDir), SessionSettings(numThreads, provider),
+-                ) { Log.w(TAG, it) }
++                val model = SupertonicModel.load(File(modelDir), graphs::open)
+                 val handle = "supertonic-${nextHandle.getAndIncrement()}"
+                 models[handle] = model
+                 Log.i(
+                     TAG,
+-                    "Loaded $modelDir as $handle on ${model.provider} with $numThreads threads " +
++                    "Loaded $modelDir as $handle on ${model.provider} " +
+                         "in ${SystemClock.elapsedRealtime() - started} ms",
+                 )
+                 main.post { result.success(handle) }
+@@ -166,14 +156,12 @@ internal class OnnxTtsChannelHandler(
+                     if (utterance.cancelled) break
+                     model.synthesize(
+                         segment, request.lang, request.voice, request.speed, request.steps,
+-                        NoiseGenerator(random.nextLong()), utterance.runOptions,
++                        NoiseGenerator(random.nextLong()), { utterance.cancelled },
+                     ) { utterance.queue.put(Chunk.Audio(it)) }
+                 }
+                 utterance.queue.put(Chunk.End)
+             } catch (e: Throwable) {
+                 utterance.queue.put(if (utterance.cancelled) Chunk.End else Chunk.Failed(e))
+-            } finally {
+-                utterance.closeRunOptions()
+             }
+         }
+ 
+@@ -273,12 +261,10 @@ internal class OnnxTtsChannelHandler(
+         synthesis.execute {
+             try {
+                 val pieces = ArrayList<FloatArray>()
+-                OrtSession.RunOptions().use { runOptions ->
+-                    model.synthesize(
+-                        text, request.lang, request.voice, request.speed, request.steps,
+-                        NoiseGenerator(seed ?: random.nextLong()), runOptions,
+-                    ) { pieces.add(it) }
+-                }
++                model.synthesize(
++                    text, request.lang, request.voice, request.speed, request.steps,
++                    NoiseGenerator(seed ?: random.nextLong()), { false },
++                ) { pieces.add(it) }
+                 val pcm = FloatArray(pieces.sumOf { it.size })
+                 var offset = 0
+                 for (piece in pieces) {
+@@ -360,7 +346,6 @@ internal class OnnxTtsChannelHandler(
+         val hold: AutoCloseable,
+     ) {
+         val queue = LinkedBlockingQueue<Chunk>()
+-        val runOptions = OrtSession.RunOptions()
+ 
+         @Volatile
+         var cancelled = false
+@@ -368,23 +353,11 @@ internal class OnnxTtsChannelHandler(
+         @Volatile
+         var player: PcmPlayer? = null
+ 
+-        private var runOptionsClosed = false
+-
+         fun cancel() {
+             cancelled = true
+-            synchronized(this) {
+-                // Aborts the ONNX Runtime run in flight.
+-                if (!runOptionsClosed) runOptions.setTerminate(true)
+-            }
+             player?.halt()
+         }
+ 
+-        fun closeRunOptions() {
+-            synchronized(this) {
+-                runOptionsClosed = true
+-                runOptions.close()
+-            }
+-        }
+     }
+ 
+     private fun executor(name: String, priority: Int): ExecutorService =
+diff --git a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/supertonic/ExecutionProviders.kt b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/supertonic/ExecutionProviders.kt
+deleted file mode 100644
+index 16a9ccd..0000000
+--- a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/supertonic/ExecutionProviders.kt
++++ /dev/null
+@@ -1,69 +0,0 @@
+-package com.muxable.ondevicetts.supertonic
+-
+-import ai.onnxruntime.OrtEnvironment
+-import ai.onnxruntime.OrtException
+-import ai.onnxruntime.OrtSession
+-import java.io.File
+-
+-/** Creates ONNX Runtime sessions on the requested execution provider. */
+-internal object ExecutionProviders {
+-    const val CPU = "cpu"
+-    const val XNNPACK = "xnnpack"
+-    const val NNAPI = "nnapi"
+-    const val COREML = "coreml"
+-
+-    const val ALLOW_SPINNING = "session.intra_op.allow_spinning"
+-
+-    /**
+-     * Creates a session for [file] on `settings.provider` and returns it with
+-     * the provider it really uses. A provider that's unknown, unavailable
+-     * on this platform (e.g. `coreml` on Android) or fails to take the
+-     * model falls back to the CPU, and [log] says so.
+-     */
+-    fun createSession(
+-        env: OrtEnvironment,
+-        file: File,
+-        settings: SessionSettings,
+-        log: (String) -> Unit,
+-    ): Pair<OrtSession, String> {
+-        if (settings.provider != CPU) {
+-            try {
+-                return options(settings).use { env.createSession(file.path, it) } to settings.provider
+-            } catch (e: Exception) {
+-                log("${settings.provider} can't run ${file.name}, falling back to cpu: ${e.message}")
+-            }
+-        }
+-        return options(settings.copy(provider = CPU)).use { env.createSession(file.path, it) } to CPU
+-    }
+-
+-    private fun options(settings: SessionSettings): OrtSession.SessionOptions {
+-        val options = OrtSession.SessionOptions()
+-        try {
+-            val threads = settings.numThreads.coerceAtLeast(1)
+-            // By default the intra-op threads busy-wait for more work after
+-            // each parallel section, and for a while after a run ends. Chat
+-            // comes a message at a time with idle gaps, so spinning burns the
+-            // battery for nothing; blocking costs little latency (see
+-            // doc/native_contract.md, "Threads").
+-            options.addConfigEntry(ALLOW_SPINNING, "0")
+-            when (settings.provider) {
+-                CPU -> options.setIntraOpNumThreads(threads)
+-                XNNPACK -> {
+-                    // As ONNX Runtime recommends for XNNPACK: it gets the
+-                    // threads, and the CPU provider's pool has none.
+-                    options.addXnnpack(mapOf("intra_op_num_threads" to threads.toString()))
+-                    options.setIntraOpNumThreads(1)
+-                }
+-                NNAPI -> {
+-                    options.setIntraOpNumThreads(threads)
+-                    options.addNnapi()
+-                }
+-                else -> throw OrtException("unknown or unavailable execution provider '${settings.provider}'")
+-            }
+-        } catch (e: Exception) {
+-            options.close()
+-            throw e
+-        }
+-        return options
+-    }
+-}
+diff --git a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/supertonic/GraphSession.kt b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/supertonic/GraphSession.kt
+new file mode 100644
+index 0000000..7a366f7
+--- /dev/null
++++ b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/supertonic/GraphSession.kt
+@@ -0,0 +1,11 @@
++package com.muxable.ondevicetts.supertonic
++
++import java.io.Closeable
++
++internal class GraphTensor(val data: Any, val shape: LongArray) {
++    val floats get() = data as FloatArray
++}
++
++internal interface GraphSession : Closeable {
++    fun run(inputs: Map<String, GraphTensor>): GraphTensor
++}
+diff --git a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/supertonic/SupertonicModel.kt b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/supertonic/SupertonicModel.kt
+index 40c1fd9..5b2775b 100644
+--- a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/supertonic/SupertonicModel.kt
++++ b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/supertonic/SupertonicModel.kt
+@@ -26,14 +26,8 @@
+ 
+ package com.muxable.ondevicetts.supertonic
+ 
+-import ai.onnxruntime.OnnxTensor
+-import ai.onnxruntime.OrtEnvironment
+-import ai.onnxruntime.OrtException
+-import ai.onnxruntime.OrtSession
+ import java.io.Closeable
+ import java.io.File
+-import java.nio.FloatBuffer
+-import java.nio.LongBuffer
+ 
+ /** The model's settings from `tts.json`. */
+ internal class SupertonicConfig(
+@@ -112,22 +106,18 @@ internal interface SynthesisTrace {
+ /** Thrown when a model directory can't be loaded. */
+ class SupertonicLoadException(message: String, cause: Throwable? = null) : Exception(message, cause)
+ 
+-/** How sessions run: ONNX Runtime's execution provider and thread count. */
+-internal data class SessionSettings(val numThreads: Int, val provider: String)
+-
+ /**
+  * Supertonic 3: duration predictor → text encoder → flow-matching vector
+- * estimator (N steps) → vocoder, each an ONNX Runtime session.
++ * estimator (N steps) → vocoder, each a flutter_onnx graph session.
+  */
+ internal class SupertonicModel(
+-    private val env: OrtEnvironment,
+     val config: SupertonicConfig,
+     val processor: SupertonicTextProcessor,
+     val voices: Map<String, VoiceStyle>,
+-    private val durationPredictor: OrtSession,
+-    private val textEncoder: OrtSession,
+-    private val vectorEstimator: OrtSession,
+-    private val vocoder: OrtSession,
++    private val durationPredictor: GraphSession,
++    private val textEncoder: GraphSession,
++    private val vectorEstimator: GraphSession,
++    private val vocoder: GraphSession,
+     /** The provider the sessions actually run on, after any fallback. */
+     val provider: String,
+ ) : Closeable {
+@@ -139,8 +129,7 @@ internal class SupertonicModel(
+      * and hands each chunk's audio to [onAudio] as soon as it's ready, with
+      * [SILENCE_SECONDS] of silence between chunks. Blank text makes no audio.
+      *
+-     * [runOptions] lets another thread abort a run in flight with
+-     * `setTerminate(true)`; the run then throws [OrtException].
++     * Cancellation is checked before every graph execution.
+      */
+     fun synthesize(
+         text: String,
+@@ -149,14 +138,14 @@ internal class SupertonicModel(
+         speed: Float,
+         steps: Int,
+         noise: NoiseGenerator,
+-        runOptions: OrtSession.RunOptions,
++        cancelled: () -> Boolean,
+         trace: SynthesisTrace? = null,
+         onAudio: (FloatArray) -> Unit,
+     ) {
+         val chunks = TextChunker.chunk(text, TextChunker.maxLengthFor(lang))
+         for ((i, chunk) in chunks.withIndex()) {
+             if (i > 0) onAudio(FloatArray((SILENCE_SECONDS * sampleRate).toInt()))
+-            onAudio(infer(chunk, lang, voice, speed, steps, noise, runOptions, trace))
++            onAudio(infer(chunk, lang, voice, speed, steps, noise, cancelled, trace))
+         }
+     }
+ 
+@@ -168,7 +157,7 @@ internal class SupertonicModel(
+         speed: Float,
+         steps: Int,
+         noise: NoiseGenerator,
+-        runOptions: OrtSession.RunOptions,
++        cancelled: () -> Boolean,
+         trace: SynthesisTrace? = null,
+     ): FloatArray {
+         val ids = processor.encode(text, lang)
+@@ -177,47 +166,18 @@ internal class SupertonicModel(
+         val textMask = FloatArray(ids.size) { 1f }
+         trace?.onIds("text_ids", ids, idsShape)
+ 
+-        OnnxTensor.createTensor(env, LongBuffer.wrap(ids), idsShape).use { idsTensor ->
+-            OnnxTensor.createTensor(env, FloatBuffer.wrap(textMask), maskShape).use { maskTensor ->
+-                OnnxTensor.createTensor(env, FloatBuffer.wrap(voice.ttl), voice.ttlShape).use { ttlTensor ->
+-                    OnnxTensor.createTensor(env, FloatBuffer.wrap(voice.dp), voice.dpShape).use { dpTensor ->
+-                        // Duration (seconds), scaled by speed.
+-                        val rawDuration = durationPredictor.run(
+-                            mapOf("text_ids" to idsTensor, "style_dp" to dpTensor, "text_mask" to maskTensor),
+-                            runOptions,
+-                        ).use { floats(it[0] as OnnxTensor)[0] }
+-                        val duration = rawDuration / speed
+-                        trace?.onFloats("duration", floatArrayOf(duration), longArrayOf(1))
+-
+-                        return textEncoder.run(
+-                            mapOf("text_ids" to idsTensor, "style_ttl" to ttlTensor, "text_mask" to maskTensor),
+-                            runOptions,
+-                        ).use { encoded ->
+-                            val textEmb = encoded[0] as OnnxTensor
+-                            if (trace != null) {
+-                                trace.onFloats("text_emb", floats(textEmb), textEmb.info.shape)
+-                            }
+-                            denoiseAndVocode(
+-                                duration, steps, noise, runOptions, trace,
+-                                textEmb, ttlTensor, maskTensor,
+-                            )
+-                        }
+-                    }
+-                }
+-            }
++        val idsTensor = GraphTensor(ids, idsShape)
++        val maskTensor = GraphTensor(textMask, maskShape)
++        val ttlTensor = GraphTensor(voice.ttl, voice.ttlShape)
++        fun run(session: GraphSession, vararg inputs: Pair<String, GraphTensor>): GraphTensor {
++            if (cancelled()) throw InterruptedException("Speech stopped")
++            return session.run(mapOf(*inputs))
+         }
+-    }
+-
+-    private fun denoiseAndVocode(
+-        duration: Float,
+-        steps: Int,
+-        noise: NoiseGenerator,
+-        runOptions: OrtSession.RunOptions,
+-        trace: SynthesisTrace?,
+-        textEmb: OnnxTensor,
+-        ttlTensor: OnnxTensor,
+-        maskTensor: OnnxTensor,
+-    ): FloatArray {
++        val duration = run(durationPredictor, "text_ids" to idsTensor,
++            "style_dp" to GraphTensor(voice.dp, voice.dpShape), "text_mask" to maskTensor).floats[0] / speed
++        trace?.onFloats("duration", floatArrayOf(duration), longArrayOf(1))
++        val textEmb = run(textEncoder, "text_ids" to idsTensor, "style_ttl" to ttlTensor, "text_mask" to maskTensor)
++        trace?.onFloats("text_emb", textEmb.floats, textEmb.shape)
+         // The reference computes these in float32.
+         val wavLength = (duration * sampleRate).toLong()
+         val chunkSize = config.chunkSize
+@@ -235,33 +195,16 @@ internal class SupertonicModel(
+         }
+         trace?.onFloats("noise", latent, latentShape)
+ 
+-        OnnxTensor.createTensor(env, FloatBuffer.wrap(latentMask), longArrayOf(1, 1, latentLength.toLong())).use { latentMaskTensor ->
+-            OnnxTensor.createTensor(env, FloatBuffer.wrap(floatArrayOf(steps.toFloat())), SCALAR_BATCH).use { totalStepTensor ->
+-                for (step in 0 until steps) {
+-                    latent = OnnxTensor.createTensor(env, FloatBuffer.wrap(floatArrayOf(step.toFloat())), SCALAR_BATCH).use { stepTensor ->
+-                        OnnxTensor.createTensor(env, FloatBuffer.wrap(latent), latentShape).use { latentTensor ->
+-                            vectorEstimator.run(
+-                                mapOf(
+-                                    "noisy_latent" to latentTensor,
+-                                    "text_emb" to textEmb,
+-                                    "style_ttl" to ttlTensor,
+-                                    "latent_mask" to latentMaskTensor,
+-                                    "text_mask" to maskTensor,
+-                                    "current_step" to stepTensor,
+-                                    "total_step" to totalStepTensor,
+-                                ),
+-                                runOptions,
+-                            ).use { floats(it[0] as OnnxTensor) }
+-                        }
+-                    }
+-                    trace?.onFloats("latent_$step", latent, latentShape)
+-                }
+-            }
+-        }
+-
+-        val wav = OnnxTensor.createTensor(env, FloatBuffer.wrap(latent), latentShape).use { latentTensor ->
+-            vocoder.run(mapOf("latent" to latentTensor), runOptions).use { floats(it[0] as OnnxTensor) }
++        val mask = GraphTensor(latentMask, longArrayOf(1, 1, latentLength.toLong()))
++        val total = GraphTensor(floatArrayOf(steps.toFloat()), SCALAR_BATCH)
++        for (step in 0 until steps) {
++            latent = run(vectorEstimator, "noisy_latent" to GraphTensor(latent, latentShape),
++                "text_emb" to textEmb, "style_ttl" to ttlTensor, "latent_mask" to mask,
++                "text_mask" to maskTensor, "current_step" to GraphTensor(floatArrayOf(step.toFloat()), SCALAR_BATCH),
++                "total_step" to total).floats
++            trace?.onFloats("latent_$step", latent, latentShape)
+         }
++        val wav = run(vocoder, "latent" to GraphTensor(latent, latentShape)).floats
+         trace?.onFloats("wav", wav, longArrayOf(1, wav.size.toLong()))
+         val trimmed = (sampleRate * duration).toInt().coerceIn(0, wav.size)
+         return if (trimmed == wav.size) wav else wav.copyOf(trimmed)
+@@ -290,11 +233,6 @@ internal class SupertonicModel(
+ 
+         private val MODEL_NAMES = listOf("duration_predictor", "text_encoder", "vector_estimator", "vocoder")
+ 
+-        private fun floats(tensor: OnnxTensor): FloatArray {
+-            val buffer = tensor.floatBuffer
+-            return FloatArray(buffer.remaining()).also { buffer.get(it) }
+-        }
+-
+         /** The model directory's ONNX files: `onnx/` when present, else the directory itself. */
+         fun onnxDir(dir: File): File = File(dir, "onnx").takeIf { it.isDirectory } ?: dir
+ 
+@@ -315,10 +253,8 @@ internal class SupertonicModel(
+          * four models, and `voice_styles/` with one JSON file per voice.
+          */
+         fun load(
+-            env: OrtEnvironment,
+             dir: File,
+-            settings: SessionSettings,
+-            log: (String) -> Unit,
++            open: (File) -> GraphSession,
+         ): SupertonicModel {
+             if (!dir.isDirectory) throw SupertonicLoadException("Model directory not found: $dir")
+             val onnx = onnxDir(dir)
+@@ -345,22 +281,16 @@ internal class SupertonicModel(
+                 modelFile(onnx, name) ?: throw SupertonicLoadException("Missing $name.onnx in $onnx")
+             }
+ 
+-            val sessions = ArrayList<OrtSession>()
+-            var provider = settings.provider
++            val sessions = ArrayList<GraphSession>()
+             try {
+-                for (file in files) {
+-                    val (session, used) = ExecutionProviders.createSession(env, file, settings.copy(provider = provider), log)
+-                    // Once a provider fails, use the CPU for the rest too.
+-                    provider = used
+-                    sessions.add(session)
+-                }
+-            } catch (e: OrtException) {
++                for (file in files) sessions.add(open(file))
++            } catch (e: Exception) {
+                 sessions.forEach { it.close() }
+                 throw SupertonicLoadException("Can't load the model in $onnx: ${e.message}", e)
+             }
+             return SupertonicModel(
+-                env, config, SupertonicTextProcessor(indexer), voices,
+-                sessions[0], sessions[1], sessions[2], sessions[3], provider,
++                config, SupertonicTextProcessor(indexer), voices,
++                sessions[0], sessions[1], sessions[2], sessions[3], "cpu",
+             )
+         }
+     }
+diff --git a/packages/on_device_tts/android/src/test/kotlin/com/muxable/ondevicetts/supertonic/ReferenceParityTest.kt b/packages/on_device_tts/android/src/test/kotlin/com/muxable/ondevicetts/supertonic/ReferenceParityTest.kt
+index e83860f..49c6dab 100644
+--- a/packages/on_device_tts/android/src/test/kotlin/com/muxable/ondevicetts/supertonic/ReferenceParityTest.kt
++++ b/packages/on_device_tts/android/src/test/kotlin/com/muxable/ondevicetts/supertonic/ReferenceParityTest.kt
+@@ -2,6 +2,9 @@ package com.muxable.ondevicetts.supertonic
+ 
+ import ai.onnxruntime.OrtEnvironment
+ import ai.onnxruntime.OrtSession
++import ai.onnxruntime.OnnxTensor
++import java.nio.FloatBuffer
++import java.nio.LongBuffer
+ import org.junit.jupiter.api.Assumptions.assumeTrue
+ import org.junit.jupiter.api.Test
+ import java.io.File
+@@ -21,8 +24,8 @@ import kotlin.test.assertTrue
+  * reference tensors as little-endian binaries; the manifest names the model
+  * directory. Run it with
+  * `SUPERTONIC_PARITY_DIR=... ./gradlew :on_device_tts:testDebugUnitTest`
+- * from the app's `android/` (the variable also puts the desktop ONNX Runtime
+- * on the test classpath).
++ * from the app's `android/`. The standalone JVM suite uses ONNX Runtime as
++ * its graph evaluator.
+  */
+ class ReferenceParityTest {
+     private class Trace : SynthesisTrace {
+@@ -50,9 +53,32 @@ class ReferenceParityTest {
+         val tolerances = (manifest["tolerances"] as Map<*, *>).mapValues { (it.value as Number).toDouble() }
+ 
+         val env = OrtEnvironment.getEnvironment()
+-        val model = SupertonicModel.load(
+-            env, File(manifest["model_dir"] as String), SessionSettings(numThreads = 2, provider = "cpu"),
+-        ) { println(it) }
++        val model = SupertonicModel.load(File(manifest["model_dir"] as String)) { file ->
++            val session = OrtSession.SessionOptions().use { opts ->
++                opts.setIntraOpNumThreads(2)
++                env.createSession(file.absolutePath, opts)
++            }
++            object : GraphSession {
++                override fun close() = session.close()
++                override fun run(inputs: Map<String, GraphTensor>): GraphTensor {
++                    val tensors = inputs.mapValues { (_, t) ->
++                        when (val data = t.data) {
++                            is LongArray -> OnnxTensor.createTensor(env, LongBuffer.wrap(data), t.shape)
++                            else -> OnnxTensor.createTensor(env, FloatBuffer.wrap(t.floats), t.shape)
++                        }
++                    }
++                    try {
++                        return session.run(tensors).use {
++                            val output = it[0] as OnnxTensor
++                            val values = output.floatBuffer
++                            GraphTensor(FloatArray(values.remaining()).also { buf -> values.get(buf) }, output.info.shape)
++                        }
++                    } finally {
++                        tensors.values.forEach { it.close() }
++                    }
++                }
++            }
++        }
+ 
+         val report = StringBuilder()
+         var worstWav = 0.0
+@@ -61,18 +87,16 @@ class ReferenceParityTest {
+                 case as Map<*, *>
+                 val name = case["name"] as String
+                 val trace = Trace()
+-                val pcm = OrtSession.RunOptions().use { runOptions ->
+-                    model.infer(
++                val pcm = model.infer(
+                         case["text"] as String,
+                         case["lang"] as String,
+                         model.voices.getValue(case["voice"] as String),
+                         (case["speed"] as Number).toFloat(),
+                         (case["steps"] as Number).toInt(),
+                         NoiseGenerator((case["seed"] as Number).toLong()),
+-                        runOptions,
++                        { false },
+                         trace,
+                     )
+-                }
+ 
+                 for ((tensorName, spec) in case["tensors"] as Map<*, *>) {
+                     tensorName as String
+diff --git a/packages/on_device_tts/doc/ios.md b/packages/on_device_tts/doc/ios.md
+index bca516c..4c22e8b 100644
+--- a/packages/on_device_tts/doc/ios.md
++++ b/packages/on_device_tts/doc/ios.md
+@@ -1,4 +1,4 @@
+-# The ONNX Runtime engine on iOS
++# The neural speech engine on iOS
+ 
+ The Swift implementation of `native_contract.md`.
+ 
+@@ -26,24 +26,9 @@ The app uses `ios/on_device_tts/Package.swift` to compile the system speech
+ adapter, Flutter plugin and neural engine. The standalone `OnDeviceTtsCore`
+ package continues to run the engine tests without Flutter.
+ 
+-An earlier SPM build was rejected with ITMS-90208 because Xcode embedded an
+-`onnxruntime.framework` wrapper whose binary required iOS 15.5 but whose
+-copied `Info.plist` declared 15.1. The package's static product alone did not
+-prevent this wrapper from being embedded.
+-
+-Runner's final build phase runs `ios/tool/repair_onnx_framework.py`.
+-It reads the binary's deployment target with `vtool`, updates only ONNX
+-Runtime's plist to match, and re-signs that framework before Runner is signed.
+-The existing iOS build workflow runs this phase during archive creation.
+-Other embedded frameworks are left to Xcode's validation.
+-App Store acceptance still requires Apple's processing of a signed upload.
+-
+-The podspec remains available for other apps using CocoaPods.
+-
+-ONNX Runtime is the official build (MIT), pinned to **1.24.2** in both the
+-podspec (`onnxruntime-objc`) and the `OnDeviceTtsCore` Swift package
+-(Microsoft's `onnxruntime-swift-package-manager`, whose newest release is
+-1.24.2), so the tests run the same ONNX Runtime version the app ships. It needs iOS 15.1; the app targets 15.5.
++Production uses flutter_onnx with Accelerate for dense matrix products.
++The standalone Swift test target uses Microsoft ONNX Runtime as an independent
++graph evaluator. CocoaPods and SwiftPM consumers compile the same Swift sources.
+ 
+ ## Running the tests
+ 
+@@ -58,30 +43,16 @@ TEST_RUNNER_SUPERTONIC_MODEL_DIR="$MODEL_DIR" xcodebuild test \
+ ```
+ 
+ Without `SUPERTONIC_MODEL_DIR` the tests that need the model are skipped.
+-`TEST_RUNNER_SUPERTONIC_BENCHMARK=cpu` (or `coreml`, `xnnpack`) runs the
+-timing benchmark instead. CI runs all of this in
++CI runs the Swift suite and real-model comparisons in
+ `.github/workflows/on-device-tts-ios.yml`.
+ 
+ ## Platform details
+ 
+-- **Providers:** `cpu` (the default), `coreml` and `xnnpack`. `coreml` tries
+-  the ML Program format with `MLComputeUnits=ALL`, then the NeuralNetwork
+-  format, then `cpu`. On the simulator ML Program fails to compile these
+-  models (error -7), and NeuralNetwork runs about 25 % of the nodes on CPU,
+-  in 30 to 140 partitions per model; it was no faster than `cpu` there.
+-  Simulator numbers say nothing about the Neural Engine, so `coreml` still
+-  needs measuring on an iPhone.
+-- **Threads:** every session sets `session.intra_op.allow_spinning=0`
+-  (`SupertonicModel.sessionConfig`), for every provider, as on Android
+-  (#1531): chat comes a message at a time, and spinning intra-op threads
+-  burn the battery between runs. Sessions run sequentially, so there is no
+-  inter-op pool. Inference runs at `.userInitiated` QoS.
++- **Graph execution:** one persistent isolate per graph. CPU matrix products use Accelerate.
+ - **Audio:** `done` comes from the `dataPlayedBack` completion of the last
+   buffer. Synthesis runs at most two buffers ahead of playback. The engine
+   is paused between utterances.
+-- **Stopping:** the Objective-C API has no `RunOptions` terminate, so
+-  synthesis checks for cancellation before every model run; a vector
+-  estimator step takes tens of milliseconds. Playback stops at once.
++- **Stopping:** playback stops immediately. Synthesis checks cancellation between graph calls.
+ 
+ ## Audio robustness
+ 
+diff --git a/packages/on_device_tts/doc/native_contract.md b/packages/on_device_tts/doc/native_contract.md
+index 0f68bd4..6843e78 100644
+--- a/packages/on_device_tts/doc/native_contract.md
++++ b/packages/on_device_tts/doc/native_contract.md
+@@ -1,7 +1,7 @@
+-# Native ONNX Runtime engine: platform contract
++# Neural speech engine: platform contract
+ 
+ The Dart side (`OnnxTtsPlatform`, `OnnxTts`) talks to a native engine that
+-runs neural TTS models on the official ONNX Runtime. Android implements it in
++runs neural TTS models with flutter_onnx. Android implements it in
+ Kotlin (`android/`), iOS in Swift (`ios/`). Both must behave as described
+ here; where this document and an implementation disagree, fix one of them.
+ 
+@@ -33,21 +33,12 @@ Returns a `String` handle, e.g. `supertonic-1`. Handles are never reused
+ within a process.
+ 
+ Loads the sessions once; every later call with the handle reuses them.
+-`numThreads` is ONNX Runtime's intra-op thread count. With `xnnpack` it is
+-XNNPACK's thread pool instead, and the session's own pool gets 1 thread, as
+-ONNX Runtime recommends. Every session sets
+-`session.intra_op.allow_spinning=0`, whatever the provider, so idle intra-op
+-threads block instead of busy-waiting between messages; see
+-[Threads and power](#threads-and-power).
+-
+-A provider that is unknown, not available on the platform (`nnapi` on iOS,
+-`coreml` on Android) or that fails to take a model **falls back to `cpu`**
+-and logs it (Android: logcat tag `OnDeviceTts`); this is not an error. Once a
+-provider has failed for one of the model's files, the rest of that model's
+-files load on `cpu` too.
++The plugin accepts legacy provider and thread-count preferences. Each graph runs
++in its own Dart isolate using the CPU backend. `numThreads` is validated at load
++time. The backend controls its own threading.
+ 
+ Errors: `load_failed` for an unknown `modelType`, a missing directory or
+-file, unreadable JSON, or a model that ONNX Runtime can't load.
++file, unreadable JSON, or a model that flutter_onnx can't load.
+ `bad_args` for `numThreads < 1`.
+ 
+ #### Supertonic model directory
+@@ -152,10 +143,8 @@ Errors: `bad_args`, `synthesis_failed`.
+ ### `stop`
+ 
+ No arguments; returns `null` at once. Stops the active utterance: playback
+-stops and buffered audio is dropped immediately, and the ONNX Runtime run in
+-flight is terminated (`RunOptions.setTerminate`; ONNX Runtime's
+-Objective-C API on iOS has no equivalent, so there synthesis stops before
+-its next model run instead, and nothing more is played). The pending `speak` call
++stops and buffered audio is dropped immediately. Synthesis checks cancellation
++before the next graph call. The pending `speak` call
+ then completes normally (`null`), and a `stopped` event is sent. Without an
+ active utterance it does nothing.
+ 
+@@ -194,15 +183,9 @@ after it.
+ 
+ ## Threads and power
+ 
+-* **Spinning.** ONNX Runtime's intra-op threads busy-wait for work by
+-  default. Chat arrives a message at a time, so every session sets
+-  `session.intra_op.allow_spinning=0`.
+-* **Priorities (Android).** Models load and synthesize at
+-  `THREAD_PRIORITY_DEFAULT`. ONNX Runtime starts a session's intra-op
+-  threads on the thread that creates the session, and they inherit its
+-  priority, so loading at background priority would leave half of every
+-  inference at background priority. The playback thread runs at
+-  `THREAD_PRIORITY_AUDIO`.
++* **Inference.** Graph isolates wait for work over receive ports between calls.
++* **Priorities (Android).** The loader and synthesis threads use
++  `THREAD_PRIORITY_DEFAULT`. Playback uses `THREAD_PRIORITY_AUDIO`.
+ * **Wake lock (Android).** A partial wake lock (`on_device_tts:speak`) is
+   held while a model loads and from `speak` until its terminal event, with a
+   10-minute timeout per hold; never between utterances. With the screen off
+@@ -329,6 +312,9 @@ PRNG and writes every intermediate tensor (`text_ids`, `duration`,
+ `text_emb`, `noise`, `latent_<step>`, `wav`) and the trimmed PCM, with a
+ `manifest.json`. Platform tests compare against it:
+ 
++* From `packages/on_device_tts`, run
++  `SUPERTONIC_PARITY_DIR=<dir> flutter test test/graph_worker_test.dart` to
++  compare the complete PCM from the Dart graph workers with the reference.
+ * Android JVM: `SUPERTONIC_PARITY_DIR=<dir> ./gradlew
+   :on_device_tts:testDebugUnitTest` from the app's `android/`
+   (`ReferenceParityTest`, desktop ONNX Runtime).
+@@ -339,3 +325,10 @@ Expected: fp32 output within 1e-3 max abs difference of the reference (bit
+ exact on the same ONNX Runtime CPU build). int8 models are only comparable
+ on the same CPU and build: ONNX Runtime's quantized kernels differ between
+ builds, and the differences grow through the flow-matching steps.
++
++The three-segment playback integration test allows the audio duration plus
++10 seconds for synthesis and playback. With Supertonic 3, the compiled graph
++runtime took 32.4 and 39.9 seconds of wall time across two runs on a shared
++Linux x86-64 host. The single-threaded ONNX Runtime CPU reference took
++2.56 seconds on the same host. The resulting audio lasts 6.75 seconds.
++The device test measures this separately on Android and iOS.
+diff --git a/packages/on_device_tts/ios/on_device_tts.podspec b/packages/on_device_tts/ios/on_device_tts.podspec
+index d49ee58..29976d6 100644
+--- a/packages/on_device_tts/ios/on_device_tts.podspec
++++ b/packages/on_device_tts/ios/on_device_tts.podspec
+@@ -3,22 +3,18 @@ Pod::Spec.new do |s|
+   s.version          = '0.1.0'
+   s.summary          = 'On-device text-to-speech engines.'
+   s.description      = <<-DESC
+-Neural text-to-speech that runs on the device with ONNX Runtime.
++Neural text-to-speech that runs on the device with flutter_onnx.
+                        DESC
+   s.homepage         = 'https://github.com/muxable/rtchat'
+   s.license          = { :type => 'Apache-2.0' }
+   s.author           = { 'Muxable' => 'https://github.com/muxable' }
+   s.source           = { :path => '.' }
+-  # Legacy CocoaPods support. The app uses Swift Package Manager and validates
+-  # the embedded ONNX Runtime framework before signing; see doc/ios.md.
++  # Legacy CocoaPods support. The app uses Swift Package Manager.
+   # The plugin class, plus the engine, which on_device_tts/OnDeviceTtsCore/Package.swift
+   # also builds and tests on its own.
+   s.source_files = 'on_device_tts/Sources/on_device_tts/**/*.swift',
+                    'on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/**/*.swift'
+   s.dependency 'Flutter'
+-  # ONNX Runtime (MIT), pinned to the version of Microsoft's Swift package
+-  # that on_device_tts/OnDeviceTtsCore/Package.swift uses. It needs iOS 15.1.
+-  s.dependency 'onnxruntime-objc', '1.24.2'
+   s.platform = :ios, '15.1'
+   s.static_framework = true
+ 
+diff --git a/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Package.swift b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Package.swift
+index c3167db..9463197 100644
+--- a/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Package.swift
++++ b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Package.swift
+@@ -1,7 +1,7 @@
+ // swift-tools-version: 5.9
+ 
+ // The plugin's Swift core: text processing, the noise generator, the
+-// Supertonic 3 pipeline on ONNX Runtime, and audio playback. The Flutter
++// Supertonic pipeline, and audio playback. The Flutter
+ // plugin (`../../on_device_tts.podspec`) compiles these same sources with
+ // CocoaPods; this package exists so they can be tested on their own:
+ //
+@@ -20,20 +20,17 @@ let package = Package(
+     .library(name: "OnDeviceTtsCore", targets: ["OnDeviceTtsCore"])
+   ],
+   dependencies: [
+-    // ONNX Runtime (MIT). The same version as the podspec's
+-    // onnxruntime-objc, so tests run the binary the app ships.
++    // Independent graph evaluator for standalone Swift tests.
+     .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager", exact: "1.24.2")
+   ],
+   targets: [
+     .target(
+       name: "OnDeviceTtsCore",
+-      dependencies: [
+-        .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")
+-      ]
++      dependencies: []
+     ),
+     .testTarget(
+       name: "OnDeviceTtsCoreTests",
+-      dependencies: ["OnDeviceTtsCore"],
++      dependencies: ["OnDeviceTtsCore", .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")],
+       resources: [.copy("Fixtures")]
+     ),
+   ]
+diff --git a/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/OnnxTtsEngine.swift b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/OnnxTtsEngine.swift
+index 81aaa35..22a3ac3 100644
+--- a/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/OnnxTtsEngine.swift
++++ b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/OnnxTtsEngine.swift
+@@ -54,11 +54,10 @@ public final class OnnxTtsEngine {
+   /// `busy` for good).
+   var watchdogMargin: TimeInterval = 5
+ 
+-  public convenience init() {
+-    self.init(makeOutput: { AudioOutput() })
+-  }
++  private let openGraph: OpenGraph
+ 
+-  init(makeOutput: @escaping () -> PcmOutput) {
++  init(openGraph: @escaping OpenGraph, makeOutput: @escaping () -> PcmOutput = { AudioOutput() }) {
++    self.openGraph = openGraph
+     self.makeOutput = makeOutput
+   }
+ 
+@@ -89,9 +88,7 @@ public final class OnnxTtsEngine {
+       let result: Result<SupertonicModel, OnnxTtsError>
+       do {
+         result = .success(
+-          try SupertonicModel(
+-            modelDir: modelDir, numThreads: numThreads, provider: provider,
+-            log: OnnxTtsEngine.log))
++          try SupertonicModel(modelDir: modelDir, openGraph: self.openGraph))
+       } catch {
+         result = .failure(OnnxTtsError("load_failed", error.localizedDescription))
+       }
+@@ -102,7 +99,7 @@ public final class OnnxTtsEngine {
+             self.nextHandle += 1
+             self.models[handle] = model
+             OnnxTtsEngine.log(
+-              "loaded \(modelDir) as \(handle) on \(model.provider) with \(numThreads) threads")
++              "loaded \(modelDir) as \(handle) on \(model.provider)")
+             return handle
+           })
+       }
+diff --git a/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/Supertonic/GraphSession.swift b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/Supertonic/GraphSession.swift
+new file mode 100644
+index 0000000..343fdd4
+--- /dev/null
++++ b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/Supertonic/GraphSession.swift
+@@ -0,0 +1,39 @@
++import Foundation
++
++enum GraphElement {
++  case float32, int64
++}
++
++struct GraphTensor {
++  let data: Data
++  let shape: [Int]
++  let element: GraphElement
++}
++
++protocol GraphSession {
++  func run(_ inputs: [String: GraphTensor], output: String) throws -> GraphTensor
++}
++
++typealias OpenGraph = (URL) throws -> GraphSession
++
++func floatTensor(_ values: [Float], shape: [Int]) throws -> GraphTensor {
++  try tensor(values, shape: shape, element: .float32)
++}
++
++func int64Tensor(_ values: [Int64], shape: [Int]) throws -> GraphTensor {
++  try tensor(values, shape: shape, element: .int64)
++}
++
++private func tensor<T>(_ values: [T], shape: [Int], element: GraphElement) throws -> GraphTensor {
++  guard shape.reduce(1, *) == values.count else { throw SupertonicError.invalidModel("Invalid tensor shape") }
++  return GraphTensor(data: values.withUnsafeBytes { Data($0) }, shape: shape, element: element)
++}
++
++func floats(_ value: GraphTensor) throws -> [Float] {
++  guard value.element == .float32 && value.data.count % 4 == 0 else {
++    throw SupertonicError.inference("Expected FLOAT tensor")
++  }
++  var result = [Float](repeating: 0, count: value.data.count / 4)
++  _ = result.withUnsafeMutableBytes { value.data.copyBytes(to: $0) }
++  return result
++}
+diff --git a/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/Supertonic/SupertonicModel.swift b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/Supertonic/SupertonicModel.swift
+index c5c0408..173f977 100644
+--- a/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/Supertonic/SupertonicModel.swift
++++ b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/Supertonic/SupertonicModel.swift
+@@ -26,14 +26,6 @@
+ 
+ import Foundation
+ 
+-// The Swift package gets ONNX Runtime's Objective-C API from Microsoft's
+-// Swift package; the CocoaPods build from the onnxruntime-objc pod.
+-#if canImport(OnnxRuntimeBindings)
+-  import OnnxRuntimeBindings
+-#else
+-  import onnxruntime_objc
+-#endif
+-
+ public enum SupertonicError: Error, LocalizedError {
+   case missingFile(String)
+   case invalidModel(String)
+@@ -57,11 +49,11 @@ public enum SupertonicError: Error, LocalizedError {
+ /// One of a model's voices: a voice style file's two style tensors.
+ public struct SupertonicVoice {
+   public let id: String
+-  let ttl: ORTValue
+-  let dp: ORTValue
++  let ttl: GraphTensor
++  let dp: GraphTensor
+ }
+ 
+-/// A loaded Supertonic 3 model: four ONNX Runtime sessions (duration
++/// A loaded Supertonic 3 model: four graph sessions (duration
+ /// predictor, text encoder, vector estimator, vocoder), the text processor
+ /// and the voice styles.
+ ///
+@@ -90,26 +82,12 @@ public final class SupertonicModel {
+   private let baseChunkSize: Int
+   private let chunkCompressFactor: Int
+   private let latentDim: Int
+-  private let durationPredictor: ORTSession
+-  private let textEncoder: ORTSession
+-  private let vectorEstimator: ORTSession
+-  private let vocoder: ORTSession
+-
+-  private static let env: ORTEnv? = try? ORTEnv(loggingLevel: .warning)
++  private let durationPredictor: GraphSession
++  private let textEncoder: GraphSession
++  private let vectorEstimator: GraphSession
++  private let vocoder: GraphSession
+ 
+-  /// Loads the model in `modelDir`, laid out as the Hugging Face repository
+-  /// `Supertone/supertonic-3`: `onnx/` with `tts.json`,
+-  /// `unicode_indexer.json` and the four models (`<name>.onnx`, or
+-  /// `<name>.int8.onnx`), and `voice_styles/*.json`. Without `onnx/`, the
+-  /// files are looked up in `modelDir` itself.
+-  ///
+-  /// `provider` is `cpu`, `coreml` or `xnnpack`. Anything else, or a
+-  /// provider that fails to take one of the models, falls back to `cpu`
+-  /// (for that model and the ones after it), reported through `log`.
+-  public init(
+-    modelDir: String, numThreads: Int = 2, provider: String = "cpu",
+-    log: (String) -> Void = { NSLog("%@", $0) }
+-  ) throws {
++  init(modelDir: String, openGraph: OpenGraph) throws {
+     let root = URL(fileURLWithPath: modelDir, isDirectory: true)
+     let fm = FileManager.default
+     var isDirectory: ObjCBool = false
+@@ -166,94 +144,14 @@ public final class SupertonicModel {
+ 
+     voices = try SupertonicModel.loadVoices(root.appendingPathComponent("voice_styles"))
+ 
+-    guard let env = SupertonicModel.env else {
+-      throw SupertonicError.invalidModel("ONNX Runtime failed to initialize")
+-    }
+-
+-    // The providers to try, best first. CoreML tries the newer ML Program
+-    // format, then the older NeuralNetwork format. Once one fails for a
+-    // model, the models after it skip it too.
+-    var attempts: [(provider: String, variant: String?)] = []
+-    switch provider {
+-    case "coreml": attempts = [("coreml", "MLProgram"), ("coreml", "NeuralNetwork")]
+-    case "xnnpack": attempts = [("xnnpack", nil)]
+-    case "cpu": break
+-    default: log("provider \(provider) isn't available on iOS, using cpu")
+-    }
+-    attempts.append(("cpu", nil))
+-    var sessions = [ORTSession]()
+-    var providers = [String]()
+-    for url in modelURLs {
+-      while true {
+-        let attempt = attempts[0]
+-        do {
+-          let options = try SupertonicModel.sessionOptions(
+-            numThreads: numThreads, provider: attempt.provider, variant: attempt.variant)
+-          sessions.append(try ORTSession(env: env, modelPath: url.path, sessionOptions: options))
+-          providers.append(attempt.provider)
+-          break
+-        } catch {
+-          if attempts.count == 1 {
+-            throw SupertonicError.invalidModel("\(url.lastPathComponent): \(error.localizedDescription)")
+-          }
+-          let name = [attempt.provider, attempt.variant].compactMap { $0 }.joined(separator: " ")
+-          log("provider \(name) failed for \(url.lastPathComponent) (\(error.localizedDescription)), trying \(attempts[1].provider)")
+-          attempts.removeFirst()
+-        }
+-      }
+-    }
+-    self.providers = providers
++    let sessions = try modelURLs.map(openGraph)
++    providers = modelURLs.map { _ in "cpu" }
+     durationPredictor = sessions[0]
+     textEncoder = sessions[1]
+     vectorEstimator = sessions[2]
+     vocoder = sessions[3]
+   }
+ 
+-  /// Session config entries set for every provider. ONNX Runtime's
+-  /// intra-op threads busy-wait for work by default, after each parallel
+-  /// section and for a while after a run. Chat arrives a message at a time
+-  /// with idle gaps, so spinning only burns the battery; blocking costs
+-  /// little latency (see `doc/native_contract.md`). Sessions run
+-  /// sequentially, so there is no inter-op pool to configure.
+-  static let sessionConfig = ["session.intra_op.allow_spinning": "0"]
+-
+-  /// The options for a session on `provider`. `configEntry` sees each
+-  /// config entry set (ONNX Runtime can't read them back), for tests.
+-  static func sessionOptions(
+-    numThreads: Int, provider: String, variant: String?,
+-    configEntry: ((String, String) -> Void)? = nil
+-  ) throws -> ORTSessionOptions {
+-    let options = try ORTSessionOptions()
+-    try options.setGraphOptimizationLevel(.all)
+-    for (key, value) in sessionConfig.sorted(by: { $0.key < $1.key }) {
+-      try options.addConfigEntry(withKey: key, value: value)
+-      configEntry?(key, value)
+-    }
+-    switch provider {
+-    case "cpu":
+-      try options.setIntraOpNumThreads(Int32(numThreads))
+-    case "coreml":
+-      guard ORTIsCoreMLExecutionProviderAvailable() else {
+-        throw SupertonicError.invalidModel("CoreML execution provider not built in")
+-      }
+-      try options.setIntraOpNumThreads(Int32(numThreads))
+-      try options.appendCoreMLExecutionProvider(withOptionsV2: [
+-        "ModelFormat": variant ?? "MLProgram",
+-        "MLComputeUnits": "ALL",
+-      ])
+-    case "xnnpack":
+-      // As ONNX Runtime recommends: XNNPACK gets the threads, the session's
+-      // own pool one thread.
+-      try options.setIntraOpNumThreads(1)
+-      let xnnpack = ORTXnnpackExecutionProviderOptions()
+-      xnnpack.intra_op_num_threads = Int32(numThreads)
+-      try options.appendXnnpackExecutionProvider(with: xnnpack)
+-    default:
+-      throw SupertonicError.invalidModel("unknown provider \(provider)")
+-    }
+-    return options
+-  }
+-
+   /// Every `*.json` file in `dir`, sorted by id (the file name without
+   /// `.json`).
+   private static func loadVoices(_ dir: URL) throws -> [SupertonicVoice] {
+@@ -279,7 +177,7 @@ public final class SupertonicModel {
+     guard let dict = json as? [String: Any] else {
+       throw SupertonicError.invalidModel("\(name) is not an object")
+     }
+-    func tensor(_ key: String) throws -> ORTValue {
++    func tensor(_ key: String) throws -> GraphTensor {
+       guard let component = dict[key] as? [String: Any], let dims = component["dims"] as? [Int],
+         let data = component["data"]
+       else {
+@@ -364,7 +262,7 @@ public final class SupertonicModel {
+   /// One chunk through the four models (supertonic/core.py
+   /// `Supertonic.__call__`), trimmed to the predicted duration.
+   func infer(
+-    _ text: String, language: String, style: (ttl: ORTValue, dp: ORTValue), speed: Float,
++    _ text: String, language: String, style: (ttl: GraphTensor, dp: GraphTensor), speed: Float,
+     steps: Int, noise: inout NoiseGenerator, isCancelled: () -> Bool
+   ) throws -> [Float] {
+     func check() throws {
+@@ -424,31 +322,9 @@ public final class SupertonicModel {
+     return Array(wav.prefix(wavLength))
+   }
+ 
+-  private func run(_ session: ORTSession, _ inputs: [String: ORTValue], output: String) throws
+-    -> ORTValue
++  private func run(_ session: GraphSession, _ inputs: [String: GraphTensor], output: String) throws
++    -> GraphTensor
+   {
+-    let outputs = try session.run(withInputs: inputs, outputNames: [output], runOptions: nil)
+-    guard let value = outputs[output] else {
+-      throw SupertonicError.inference("missing output \(output)")
+-    }
+-    return value
++    try session.run(inputs, output: output)
+   }
+ }
+-
+-func floatTensor(_ values: [Float], shape: [Int]) throws -> ORTValue {
+-  let data = values.withUnsafeBufferPointer { NSMutableData(bytes: $0.baseAddress, length: $0.count * 4) }
+-  return try ORTValue(tensorData: data, elementType: .float, shape: shape.map { NSNumber(value: $0) })
+-}
+-
+-func int64Tensor(_ values: [Int64], shape: [Int]) throws -> ORTValue {
+-  let data = values.withUnsafeBufferPointer { NSMutableData(bytes: $0.baseAddress, length: $0.count * 8) }
+-  return try ORTValue(tensorData: data, elementType: .int64, shape: shape.map { NSNumber(value: $0) })
+-}
+-
+-func floats(_ value: ORTValue) throws -> [Float] {
+-  let data = try value.tensorData()
+-  let count = data.length / MemoryLayout<Float>.size
+-  var result = [Float](repeating: 0, count: count)
+-  result.withUnsafeMutableBytes { $0.copyMemory(from: UnsafeRawBufferPointer(start: data.bytes, count: count * 4)) }
+-  return result
+-}
+diff --git a/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Tests/OnDeviceTtsCoreTests/OnDeviceTtsCoreTests.swift b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Tests/OnDeviceTtsCoreTests/OnDeviceTtsCoreTests.swift
+index 38f23fa..6cca092 100644
+--- a/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Tests/OnDeviceTtsCoreTests/OnDeviceTtsCoreTests.swift
++++ b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Tests/OnDeviceTtsCoreTests/OnDeviceTtsCoreTests.swift
+@@ -753,18 +753,7 @@ class AudioOutputTests: XCTestCase {
+     XCTAssertThrowsError(try output.start(sampleRate: 44100))
+   }
+ 
+-  func testSessionOptionsDisableSpinningForEveryProvider() throws {
+-    for provider in ["cpu", "xnnpack", "coreml"] {
+-      var entries = [String: String]()
+-      do {
+-        _ = try SupertonicModel.sessionOptions(
+-          numThreads: 2, provider: provider, variant: nil, configEntry: { entries[$0] = $1 })
+-      } catch where provider == "coreml" {
+-        // Only if CoreML isn't built in; the entries are set before that.
+-      }
+-      XCTAssertEqual(entries["session.intra_op.allow_spinning"], "0", provider)
+-    }
+-  }
++
+ }
+ 
+ /// How `speak` recovers when the audio output fails under it.
+@@ -883,46 +872,3 @@ class AudioRecoveryTests: XCTestCase {
+     harness.speaksToTheEnd("after", handle)
+   }
+ }
+-
+-/// Timing per execution provider, printed as `BENCH` lines. Only runs when
+-/// `SUPERTONIC_BENCHMARK` is set, since it takes a while. These are
+-/// simulator numbers: they say nothing about the Neural Engine.
+-class BenchmarkTests: XCTestCase {
+-  func testProviders() throws {
+-    guard let providers = ProcessInfo.processInfo.environment["SUPERTONIC_BENCHMARK"],
+-      !providers.isEmpty
+-    else {
+-      throw XCTSkip("SUPERTONIC_BENCHMARK isn't set")
+-    }
+-    let sentences = [
+-      "xXslayerXx said POGGERS that clutch was insane.",
+-      "Thanks for the raid, welcome everyone to the stream!",
+-      "Does anyone know when the next tournament starts? I want to watch it live.",
+-    ]
+-    for provider in providers.split(separator: ",").map(String.init) {
+-      let harness = ChannelHarness(self)
+-      let loadStart = Date()
+-      let handle = try harness.load(provider: provider)
+-      let loadSeconds = Date().timeIntervalSince(loadStart)
+-      let actual = harness.engine.model(handle)?.provider ?? "?"
+-      // Warm up: the first run includes graph setup (and CoreML compilation).
+-      let warmStart = Date()
+-      _ = try harness.synthesize(handle, "Warm up.", language: "en", voice: "F1", seed: 1)
+-      let warmSeconds = Date().timeIntervalSince(warmStart)
+-      var synthSeconds = 0.0
+-      var audioSeconds = 0.0
+-      for (i, sentence) in sentences.enumerated() {
+-        let start = Date()
+-        let audio = try harness.synthesize(handle, sentence, language: "en", voice: "M1", seed: Int64(i))
+-        synthSeconds += Date().timeIntervalSince(start)
+-        audioSeconds += Double(audio.pcm.count) / Double(audio.sampleRate)
+-      }
+-      print(
+-        String(
+-          format: "BENCH provider=%@ actual=%@ load=%.2fs first=%.2fs synth=%.2fs audio=%.2fs rtf=%.3f",
+-          provider, actual, loadSeconds, warmSeconds, synthSeconds, audioSeconds,
+-          synthSeconds / audioSeconds))
+-      _ = harness.call("unload", ["handle": handle])
+-    }
+-  }
+-}
+diff --git a/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Tests/OnDeviceTtsCoreTests/ReferenceGraph.swift b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Tests/OnDeviceTtsCoreTests/ReferenceGraph.swift
+new file mode 100644
+index 0000000..d4044a3
+--- /dev/null
++++ b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Tests/OnDeviceTtsCoreTests/ReferenceGraph.swift
+@@ -0,0 +1,33 @@
++// The standalone Swift tests have no Flutter engine. Use ORT as their oracle
++// for exercising the native pipeline, player, and lifecycle.
++import Foundation
++@testable import OnDeviceTtsCore
++import OnnxRuntimeBindings
++
++private final class ReferenceGraph: GraphSession {
++  private static let env = try? ORTEnv(loggingLevel: .warning)
++  let session: ORTSession
++  init(_ url: URL) throws {
++    guard let env = Self.env else { throw SupertonicError.invalidModel("ORT init failed") }
++    let options = try ORTSessionOptions()
++    try options.setIntraOpNumThreads(2)
++    try options.addConfigEntry(withKey: "session.intra_op.allow_spinning", value: "0")
++    session = try ORTSession(env: env, modelPath: url.path, sessionOptions: options)
++  }
++  func run(_ inputs: [String: GraphTensor], output: String) throws -> GraphTensor {
++    let feeds = try inputs.mapValues { t in
++      try ORTValue(tensorData: NSMutableData(data: t.data),
++        elementType: t.element == .int64 ? .int64 : .float, shape: t.shape.map { NSNumber(value: $0) })
++    }
++    guard let out = try session.run(withInputs: feeds, outputNames: [output], runOptions: nil)[output]
++    else { throw SupertonicError.inference(output) }
++    return GraphTensor(data: try out.tensorData() as Data,
++      shape: try out.tensorTypeAndShapeInfo().shape.map { $0.intValue }, element: .float32)
++  }
++}
++
++extension OnnxTtsEngine {
++  convenience init(makeOutput: @escaping () -> PcmOutput = { AudioOutput() }) {
++    self.init(openGraph: { try ReferenceGraph($0) }, makeOutput: makeOutput)
++  }
++}
+diff --git a/packages/on_device_tts/ios/on_device_tts/Package.swift b/packages/on_device_tts/ios/on_device_tts/Package.swift
+index ffcc812..6b504bd 100644
+--- a/packages/on_device_tts/ios/on_device_tts/Package.swift
++++ b/packages/on_device_tts/ios/on_device_tts/Package.swift
+@@ -7,15 +7,9 @@ let package = Package(
+   products: [
+     .library(name: "on-device-tts", type: .static, targets: ["on_device_tts"])
+   ],
+-  dependencies: [
+-    .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager", exact: "1.24.2")
+-  ],
+   targets: [
+     .target(
+       name: "on_device_tts",
+-      dependencies: [
+-        .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")
+-      ],
+       path: ".",
+       exclude: ["OnDeviceTtsCore/Package.swift", "OnDeviceTtsCore/Tests", "OnDeviceTtsCore/tool"],
+       sources: ["Sources/on_device_tts", "OnDeviceTtsCore/Sources/OnDeviceTtsCore"]
+diff --git a/packages/on_device_tts/ios/on_device_tts/Sources/on_device_tts/FlutterGraphs.swift b/packages/on_device_tts/ios/on_device_tts/Sources/on_device_tts/FlutterGraphs.swift
+new file mode 100644
+index 0000000..9bdfffa
+--- /dev/null
++++ b/packages/on_device_tts/ios/on_device_tts/Sources/on_device_tts/FlutterGraphs.swift
+@@ -0,0 +1,74 @@
++import Flutter
++import Foundation
++
++/// Graph execution runs on a Dart worker. The engine calls these synchronous
++/// methods from its loader and inference queues, never from the main queue.
++final class FlutterGraphs {
++  let channel: FlutterMethodChannel
++  private var pending = [UUID: (Any?) -> Void]()
++  private var detached = false
++
++  init(_ messenger: FlutterBinaryMessenger) {
++    channel = FlutterMethodChannel(name: "on_device_tts/graphs", binaryMessenger: messenger)
++  }
++
++  func detach() {
++    detached = true
++    let replies = pending
++    pending.removeAll()
++    for reply in replies.values { reply(nil) }
++  }
++
++  private func call(_ method: String, _ arguments: Any) throws -> Any {
++    dispatchPrecondition(condition: .notOnQueue(.main))
++    let signal = DispatchSemaphore(value: 0)
++    var result: Any?
++    DispatchQueue.main.async {
++      if self.detached { signal.signal(); return }
++      let key = UUID()
++      self.pending[key] = { result = $0; signal.signal() }
++      self.channel.invokeMethod(method, arguments: arguments) { reply in
++        self.pending.removeValue(forKey: key)?(reply)
++      }
++    }
++    signal.wait()
++    if let error = result as? FlutterError {
++      throw SupertonicError.inference(error.message ?? error.code)
++    }
++    guard let result else { throw SupertonicError.inference("Flutter engine detached") }
++    return result
++  }
++
++  func open(_ file: URL) throws -> GraphSession {
++    guard let id = try call("open", file.path) as? NSNumber else {
++      throw SupertonicError.invalidModel("Could not load \(file.lastPathComponent)")
++    }
++    return Session(id, self)
++  }
++
++  private final class Session: GraphSession {
++    let id: NSNumber
++    let graphs: FlutterGraphs
++
++    init(_ id: NSNumber, _ graphs: FlutterGraphs) { self.id = id; self.graphs = graphs }
++
++    deinit {
++      let graphs = graphs, id = id
++      DispatchQueue.main.async {
++        if !graphs.detached { graphs.channel.invokeMethod("close", arguments: id) }
++      }
++    }
++
++    func run(_ inputs: [String: GraphTensor], output: String) throws -> GraphTensor {
++      let tensors = inputs.mapValues { t -> [String: Any] in
++        let typed = t.element == .int64 ? FlutterStandardTypedData(int64: t.data)
++          : FlutterStandardTypedData(float32: t.data)
++        return ["shape": t.shape, "data": typed]
++      }
++      guard let out = try graphs.call("run", ["id": id, "inputs": tensors]) as? [String: Any],
++        let data = out["data"] as? FlutterStandardTypedData, let shape = out["shape"] as? [Int]
++      else { throw SupertonicError.inference("Invalid graph output \(output)") }
++      return GraphTensor(data: data.data, shape: shape, element: .float32)
++    }
++  }
++}
+diff --git a/packages/on_device_tts/ios/on_device_tts/Sources/on_device_tts/OnDeviceTtsPlugin.swift b/packages/on_device_tts/ios/on_device_tts/Sources/on_device_tts/OnDeviceTtsPlugin.swift
+index 36d8f30..af615a2 100644
+--- a/packages/on_device_tts/ios/on_device_tts/Sources/on_device_tts/OnDeviceTtsPlugin.swift
++++ b/packages/on_device_tts/ios/on_device_tts/Sources/on_device_tts/OnDeviceTtsPlugin.swift
+@@ -4,22 +4,26 @@ import Foundation
+ // The engine (OnDeviceTtsCore's sources) is compiled into this module by
+ // Package.swift (or the podspec), so there is nothing to import.
+ 
+-/// The iOS side of `on_device_tts`'s ONNX Runtime engine: the
++/// The iOS side of `on_device_tts`'s neural speech engine: the
+ /// `on_device_tts/onnx` method channel and the `on_device_tts/onnx/events`
+ /// event channel. See `doc/native_contract.md`; the engine itself is
+ /// `OnnxTtsEngine` in `ios/on_device_tts/OnDeviceTtsCore`.
+ public class OnDeviceTtsPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
+-  let engine = OnnxTtsEngine()
++  let engine: OnnxTtsEngine
++  private let graphs: FlutterGraphs
+   private var eventSink: FlutterEventSink?
+ 
+-  public override init() {
++  private init(messenger: FlutterBinaryMessenger) {
++    let graphs = FlutterGraphs(messenger)
++    self.graphs = graphs
++    engine = OnnxTtsEngine(openGraph: graphs.open)
+     super.init()
+     engine.onEvent = { [weak self] event in self?.eventSink?(event) }
+   }
+ 
+   public static func register(with registrar: FlutterPluginRegistrar) {
+     SystemTtsPlugin.register(with: registrar)
+-    let instance = OnDeviceTtsPlugin()
++    let instance = OnDeviceTtsPlugin(messenger: registrar.messenger())
+     let channel = FlutterMethodChannel(
+       name: "on_device_tts/onnx", binaryMessenger: registrar.messenger())
+     registrar.addMethodCallDelegate(instance, channel: channel)
+@@ -29,6 +33,7 @@ public class OnDeviceTtsPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
+   }
+ 
+   public func detachFromEngine(for registrar: FlutterPluginRegistrar) {
++    graphs.detach()
+     engine.shutdown()
+   }
+ 
+diff --git a/packages/on_device_tts/lib/src/onnx/graph_worker.dart b/packages/on_device_tts/lib/src/onnx/graph_worker.dart
+new file mode 100644
+index 0000000..194b01c
+--- /dev/null
++++ b/packages/on_device_tts/lib/src/onnx/graph_worker.dart
+@@ -0,0 +1,146 @@
++// One worker owns each loaded graph. Model weights never cross isolate ports.
++import 'dart:async';
++import 'dart:io';
++import 'dart:isolate';
++import 'dart:typed_data';
++
++import 'package:flutter/services.dart';
++import 'package:flutter_onnx/flutter_onnx.dart';
++import 'package:flutter_onnx_cpu/flutter_onnx_cpu.dart';
++
++const _channel = MethodChannel('on_device_tts/graphs');
++final _graphs = <int, _GraphWorker>{};
++int _nextGraph = 0;
++bool _installed = false;
++
++void installGraphHandler() {
++  if (_installed) return;
++  _channel.setMethodCallHandler((call) async {
++    switch (call.method) {
++      case 'open':
++        final graph = await _GraphWorker.open(call.arguments as String);
++        final id = ++_nextGraph;
++        _graphs[id] = graph;
++        return id;
++      case 'run':
++        final args = call.arguments as Map;
++        final graph = _graphs[args['id']];
++        if (graph == null) throw StateError('Unknown speech graph');
++        return graph.run(args['inputs'] as Map);
++      case 'close':
++        _graphs.remove(call.arguments)?.close();
++        return null;
++      default:
++        throw MissingPluginException(call.method);
++    }
++  });
++  _installed = true;
++}
++
++class _GraphWorker {
++  final ReceivePort _replies = ReceivePort();
++  final _ready = Completer<SendPort>();
++  final _pending = <int, Completer<Map>>{};
++  late final Isolate _isolate;
++  late final SendPort _commands;
++  int _sequence = 0;
++  bool _closed = false;
++
++  static Future<_GraphWorker> open(String path) async {
++    final worker = _GraphWorker();
++    worker._replies.listen(worker._receive);
++    try {
++      worker._isolate = await Isolate.spawn(
++        _serveGraph,
++        (path, worker._replies.sendPort),
++        onExit: worker._replies.sendPort,
++        onError: worker._replies.sendPort,
++      );
++      worker._commands = await worker._ready.future;
++      return worker;
++    } catch (_) {
++      worker._replies.close();
++      rethrow;
++    }
++  }
++
++  void _receive(dynamic message) {
++    if (message is SendPort) {
++      _ready.complete(message);
++    } else if (message is (int, Map?, String?)) {
++      final waiter = _pending.remove(message.$1);
++      if (message.$2 != null) {
++        waiter?.complete(message.$2!);
++      } else {
++        waiter?.completeError(StateError(message.$3!));
++      }
++    } else {
++      _closed = true;
++      final error = StateError(
++        message is List ? message.first.toString() : 'Speech graph exited',
++      );
++      if (!_ready.isCompleted) _ready.completeError(error);
++      for (final waiter in _pending.values) {
++        waiter.completeError(error);
++      }
++      _pending.clear();
++      _replies.close();
++    }
++  }
++
++  Future<Map> run(Map inputs) {
++    if (_closed) throw StateError('Speech graph is closed');
++    final id = ++_sequence;
++    final waiter = _pending[id] = Completer<Map>();
++    _commands.send((id, inputs));
++    return waiter.future;
++  }
++
++  void close() {
++    if (_closed) return;
++    _closed = true;
++    _isolate.kill(priority: Isolate.immediate);
++  }
++}
++
++void _serveGraph((String, SendPort) request) async {
++  final (path, parent) = request;
++  final graph = OnnxSession.fromBytes(File(path).readAsBytesSync());
++  // A tiny difference in predicted duration can change the integer PCM
++  // length. Use the same Dart arithmetic for this graph on both platforms.
++  final backend =
++      graph.outputs.containsKey('duration') ? null : const NativeCpuBackend();
++  final commands = ReceivePort();
++  parent.send(commands.sendPort);
++  await for (final dynamic message in commands) {
++    final (id, inputs) = message as (int, Map);
++    try {
++      final feeds = <String, Tensor>{};
++      for (final e in inputs.entries) {
++        final spec = e.value as Map;
++        final data = spec['data'] as TypedData;
++        feeds[e.key as String] = Tensor.fromBytes(
++          switch (data) {
++            Int64List() => TensorType.int64,
++            Float32List() => TensorType.float32,
++            _ =>
++              throw ArgumentError(
++                'Unsupported speech tensor: ${data.runtimeType}',
++              ),
++          },
++          (spec['shape'] as List).cast<int>(),
++          data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
++        );
++      }
++      final outputs = await graph.runAsync(feeds, backend: backend);
++      final output = outputs.values.single;
++      parent.send((
++        id,
++        {'shape': output.shape, 'data': output.values as Float32List},
++        null,
++      ));
++    } catch (error) {
++      parent.send((id, null, error.toString()));
++    }
++  }
++}
+diff --git a/packages/on_device_tts/lib/src/onnx/graph_worker_stub.dart b/packages/on_device_tts/lib/src/onnx/graph_worker_stub.dart
+new file mode 100644
+index 0000000..43271ef
+--- /dev/null
++++ b/packages/on_device_tts/lib/src/onnx/graph_worker_stub.dart
+@@ -0,0 +1 @@
++void installGraphHandler() {}
+diff --git a/packages/on_device_tts/lib/src/onnx/onnx_tts.dart b/packages/on_device_tts/lib/src/onnx/onnx_tts.dart
+index 86392bb..526b01e 100644
+--- a/packages/on_device_tts/lib/src/onnx/onnx_tts.dart
++++ b/packages/on_device_tts/lib/src/onnx/onnx_tts.dart
+@@ -1,6 +1,6 @@
+ import 'onnx_tts_platform.dart';
+ 
+-/// A neural TTS model running natively on ONNX Runtime.
++/// A loaded neural speech model backed by flutter_onnx.
+ ///
+ /// ```dart
+ /// final tts = await OnnxTts.load(modelDir: '/path/to/supertonic-3');
+diff --git a/packages/on_device_tts/lib/src/onnx/onnx_tts_platform.dart b/packages/on_device_tts/lib/src/onnx/onnx_tts_platform.dart
+index 9707708..bd791ed 100644
+--- a/packages/on_device_tts/lib/src/onnx/onnx_tts_platform.dart
++++ b/packages/on_device_tts/lib/src/onnx/onnx_tts_platform.dart
+@@ -2,11 +2,11 @@ import 'package:flutter/foundation.dart';
+ import 'package:flutter/services.dart';
+ 
+ import '../device_memory.dart';
++import 'graph_worker_stub.dart' if (dart.library.io) 'graph_worker.dart';
+ 
+-/// The ONNX Runtime execution provider a model runs on.
++/// A preferred execution provider for the speech graph.
+ ///
+-/// Providers the platform doesn't have (e.g. [coreml] on Android) fall back
+-/// to [cpu].
++/// The flutter_onnx speech engine currently uses [cpu] for every preference.
+ enum OnnxProvider {
+   cpu,
+ 
+@@ -164,6 +164,7 @@ class OnnxTtsPlatform {
+     int numThreads = 2,
+     OnnxProvider provider = OnnxProvider.cpu,
+   }) async {
++    installGraphHandler();
+     final handle = await _methods.invokeMethod<String>('load', {
+       'modelType': modelType,
+       'modelDir': modelDir,
+diff --git a/packages/on_device_tts/lib/src/voice_packs/bundled_catalog.dart b/packages/on_device_tts/lib/src/voice_packs/bundled_catalog.dart
+index 65eb34d..14d25f8 100644
+--- a/packages/on_device_tts/lib/src/voice_packs/bundled_catalog.dart
++++ b/packages/on_device_tts/lib/src/voice_packs/bundled_catalog.dart
+@@ -1,7 +1,6 @@
+ // The voice packs the package offers.
+ //
+-// PROVISIONAL. The engines (#1502 on Android, #1517 on iOS) run on ONNX
+-// Runtime without a phonemizer, so the default model is Supertonic 3,
++// PROVISIONAL. The engines (#1502 on Android, #1517 on iOS) use flutter_onnx without a phonemizer, so the default model is Supertonic 3,
+ // which needs none. Supertonic 2 is also available as a smaller five-language
+ // alternative. Models requiring phonemes need a separate engine integration.
+ //
+diff --git a/packages/on_device_tts/pubspec.yaml b/packages/on_device_tts/pubspec.yaml
+index f6b7f11..76216dd 100644
+--- a/packages/on_device_tts/pubspec.yaml
++++ b/packages/on_device_tts/pubspec.yaml
+@@ -1,15 +1,24 @@
+ name: on_device_tts
+ description: >-
+   Text-to-speech engines that run on the device behind one interface:
+-  the platform's system voices, and neural voices on ONNX Runtime.
++  the platform's system voices, and neural voices on flutter_onnx.
+ version: 0.1.0
+ publish_to: "none"
+ 
+ environment:
+   sdk: ">=3.7.0 <4.0.0"
+-  flutter: ">=3.10.0"
++  flutter: ">=3.44.0"
+ 
+ dependencies:
++  flutter_onnx:
++    git:
++      url: https://github.com/kevmo314/flutter_onnx.git
++      ref: 15940d38eaf429805a78455fa1d2d3ee9a1c734a
++  flutter_onnx_cpu:
++    git:
++      url: https://github.com/kevmo314/flutter_onnx.git
++      path: cpu
++      ref: 15940d38eaf429805a78455fa1d2d3ee9a1c734a
+   background_downloader: ^9.6.4
+   crypto: ^3.0.7
+   flutter:
+diff --git a/packages/on_device_tts/test/graph_worker_test.dart b/packages/on_device_tts/test/graph_worker_test.dart
+new file mode 100644
+index 0000000..26ac504
+--- /dev/null
++++ b/packages/on_device_tts/test/graph_worker_test.dart
+@@ -0,0 +1,200 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++import 'dart:math' as math;
++import 'dart:typed_data';
++
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:on_device_tts/src/onnx/graph_worker.dart';
++
++const codec = StandardMethodCodec();
++
++Future<dynamic> call(String method, Object? args) {
++  final reply = Completer<ByteData?>();
++  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
++      .handlePlatformMessage(
++        'on_device_tts/graphs',
++        codec.encodeMethodCall(MethodCall(method, args)),
++        reply.complete,
++      );
++  return reply.future.then((bytes) => codec.decodeEnvelope(bytes!));
++}
++
++Map<String, Object> tensor(List<int> shape, TypedData data) => {
++  'shape': shape,
++  'data': data,
++};
++
++Future<Map> runGraph(int handle, Map<String, Map> inputs) async =>
++    await call('run', {'id': handle, 'inputs': inputs}) as Map;
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++  setUpAll(installGraphHandler);
++
++  test(
++    'loads, reuses and closes a graph over the native channel codec',
++    () async {
++      final dir = await Directory.systemTemp.createTemp('graph-worker');
++      addTearDown(() => dir.delete(recursive: true));
++      final file = File('${dir.path}/double.onnx');
++      // ONNX Add(x, x), FLOAT[2].
++      await file.writeAsBytes(
++        base64Decode(
++          'CA46OgoOCgF4CgF4EgF5IgNBZGQSBmRvdWJsZVoPCgF4EgoKCAgBEgQKAggCYg8KAXkSCgoICAESBAoCCAJCBAoAEBI=',
++        ),
++      );
++      final id = await call('open', file.path) as int;
++      await expectLater(
++        runGraph(id, {
++          'x': tensor([2], Uint8List(8)),
++        }),
++        throwsA(isA<PlatformException>()),
++      );
++      for (final n in [2.0, -3.5]) {
++        final y = await runGraph(id, {
++          'x': tensor([2], Float32List.fromList([n, 1])),
++        });
++        expect(y['shape'], [2]);
++        expect(y['data'], [2 * n, 2]);
++      }
++      await call('close', id);
++      await expectLater(runGraph(id, {}), throwsA(isA<PlatformException>()));
++      await expectLater(
++        call('open', '${dir.path}/missing'),
++        throwsA(isA<PlatformException>()),
++      );
++    },
++  );
++
++  final referenceDir = Platform.environment['SUPERTONIC_PARITY_DIR'];
++  test(
++    'all reference utterances match Supertone sample by sample',
++    () async {
++      final root = Directory(referenceDir!);
++      final manifest =
++          jsonDecode(await File('${root.path}/manifest.json').readAsString())
++              as Map;
++      final model = manifest['model_dir'] as String;
++      final sessions = <String, int>{};
++      addTearDown(() async {
++        for (final id in sessions.values) {
++          await call('close', id);
++        }
++      });
++      for (final name in [
++        'duration_predictor',
++        'text_encoder',
++        'vector_estimator',
++        'vocoder',
++      ]) {
++        sessions[name] = await call('open', '$model/onnx/$name.onnx') as int;
++      }
++      final cases = (manifest['cases'] as List).cast<Map>();
++      expect(cases, isNotEmpty);
++      for (final example in cases) {
++        final tensors = example['tensors'] as Map;
++        Map<String, Object> fixture(String name) {
++          final spec = tensors[name] as Map;
++          final bytes = File('${root.path}/${spec['file']}').readAsBytesSync();
++          return tensor(
++            (spec['shape'] as List).cast<int>(),
++            spec['dtype'] == 'int64'
++                ? Int64List.sublistView(bytes)
++                : Float32List.sublistView(bytes),
++          );
++        }
++
++        final styles =
++            jsonDecode(
++                  await File(
++                    '$model/voice_styles/${example['voice']}.json',
++                  ).readAsString(),
++                )
++                as Map;
++        Map<String, Object> style(String name) {
++          final spec = styles[name] as Map;
++          Iterable<double> flatten(dynamic v) sync* {
++            if (v is List) {
++              for (final item in v) {
++                yield* flatten(item);
++              }
++            } else {
++              yield (v as num).toDouble();
++            }
++          }
++
++          return tensor(
++            (spec['dims'] as List).cast<int>(),
++            Float32List.fromList(flatten(spec['data']).toList()),
++          );
++        }
++
++        final ids = fixture('text_ids'), noise = fixture('noise');
++        Map<String, Object> ones(List<int> shape) =>
++            tensor(shape, Float32List(shape.last)..fillRange(0, shape.last, 1));
++        final mask = ones([1, 1, (ids['shape'] as List).last as int]);
++        final ttl = style('style_ttl');
++        final watch = Stopwatch()..start();
++        final duration = await runGraph(sessions['duration_predictor']!, {
++          'text_ids': ids,
++          'text_mask': mask,
++          'style_dp': style('style_dp'),
++        });
++        final seconds =
++            (duration['data'] as Float32List).single /
++            (example['speed'] as num);
++        expect(
++          seconds,
++          closeTo((fixture('duration')['data'] as Float32List).single, 1e-4),
++        );
++        final emb = await runGraph(sessions['text_encoder']!, {
++          'text_ids': ids,
++          'text_mask': mask,
++          'style_ttl': ttl,
++        });
++        final latentMask = ones([1, 1, (noise['shape'] as List).last as int]);
++        Map latent = noise;
++        final steps = example['steps'] as int;
++        Map scalar(num v) => tensor([1], Float32List.fromList([v.toDouble()]));
++        for (var step = 0; step < steps; step++) {
++          latent = await runGraph(sessions['vector_estimator']!, {
++            'noisy_latent': latent,
++            'text_emb': emb,
++            'style_ttl': ttl,
++            'text_mask': mask,
++            'latent_mask': latentMask,
++            'current_step': scalar(step),
++            'total_step': scalar(steps),
++          });
++        }
++        final wav = await runGraph(sessions['vocoder']!, {'latent': latent});
++        final samples = wav['data'] as Float32List;
++        final ref = Float32List.sublistView(
++          await File('${root.path}/${example['pcm']}').readAsBytes(),
++        );
++        final length =
++            Float32List.fromList([
++              seconds * (example['sample_rate'] as int),
++            ]).single.toInt();
++        expect(length, ref.length);
++        expect(samples.length, greaterThanOrEqualTo(length));
++        var maxError = 0.0;
++        for (var i = 0; i < ref.length; i++) {
++          maxError = math.max(maxError, (samples[i] - ref[i]).abs());
++        }
++        expect(maxError, lessThan(1e-3), reason: example['name'] as String);
++        // ignore: avoid_print
++        print(
++          'Supertonic ${example['name']}: $length samples, maximum PCM error $maxError, synthesis ${watch.elapsed}.',
++        );
++      }
++    },
++    skip:
++        referenceDir == null
++            ? 'Set SUPERTONIC_PARITY_DIR to the Python oracle output'
++            : false,
++    timeout: const Timeout(Duration(minutes: 15)),
++  );
++}
+diff --git a/pubspec.lock b/pubspec.lock
+index 8ecf368..9459fda 100644
+--- a/pubspec.lock
++++ b/pubspec.lock
+@@ -9,6 +9,14 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "1.3.79"
++  archive:
++    dependency: transitive
++    description:
++      name: archive
++      sha256: "2fda90592c0afd219c5e285618a98da835cd10df38372666093d25dfe457a2d0"
++      url: "https://pub.dev"
++    source: hosted
++    version: "4.7.1"
+   args:
+     dependency: transitive
+     description:
+@@ -189,10 +197,10 @@ packages:
+     dependency: transitive
+     description:
+       name: code_assets
+-      sha256: "828110d598123b5ea96c00c9f3c72105bf79f8ee36c20a39b26209ade421ec57"
++      sha256: "1ef22a0be3af9370bd9481ac76db114db92bfe75d5ca2b2d7bc911764478a4d9"
+       url: "https://pub.dev"
+     source: hosted
+-    version: "2.1.0"
++    version: "2.2.0"
+   collection:
+     dependency: transitive
+     description:
+@@ -552,6 +560,24 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "1.0.12"
++  flutter_onnx:
++    dependency: transitive
++    description:
++      path: "."
++      ref: "15940d38eaf429805a78455fa1d2d3ee9a1c734a"
++      resolved-ref: "15940d38eaf429805a78455fa1d2d3ee9a1c734a"
++      url: "https://github.com/kevmo314/flutter_onnx.git"
++    source: git
++    version: "0.1.0"
++  flutter_onnx_cpu:
++    dependency: transitive
++    description:
++      path: cpu
++      ref: "15940d38eaf429805a78455fa1d2d3ee9a1c734a"
++      resolved-ref: "15940d38eaf429805a78455fa1d2d3ee9a1c734a"
++      url: "https://github.com/kevmo314/flutter_onnx.git"
++    source: git
++    version: "0.1.0"
+   flutter_test:
+     dependency: "direct dev"
+     description: flutter
+@@ -583,6 +609,14 @@ packages:
+     description: flutter
+     source: sdk
+     version: "0.0.0"
++  glob:
++    dependency: transitive
++    description:
++      name: glob
++      sha256: "218aeb56050c714f62a3182775320dfa04602b55074873e24e31bbd39bda96fb"
++      url: "https://pub.dev"
++    source: hosted
++    version: "2.2.0"
+   hooks:
+     dependency: transitive
+     description:
+@@ -615,6 +649,14 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "4.1.2"
++  image:
++    dependency: transitive
++    description:
++      name: image
++      sha256: bc13f61f0f5cb77936e78ae5dae3800f442718dac5d2bc4654f03c239230ed0c
++      url: "https://pub.dev"
++    source: hosted
++    version: "4.13.1"
+   integration_test:
+     dependency: "direct dev"
+     description: flutter
+@@ -628,6 +670,14 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "0.20.3"
++  j2k:
++    dependency: transitive
++    description:
++      name: j2k
++      sha256: "2957b9be387157340fc06d32947c39f5180d6c57c56cc132ef28dee95f6c854a"
++      url: "https://pub.dev"
++    source: hosted
++    version: "1.0.0"
+   jni:
+     dependency: transitive
+     description:
+@@ -692,6 +742,14 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "6.1.0"
++  listen:
++    dependency: transitive
++    description:
++      name: listen
++      sha256: "47501a08016a43fcad79252439d723f50f14f88fa7bfd8a177e0a417e5c9e1f2"
++      url: "https://pub.dev"
++    source: hosted
++    version: "1.0.1"
+   logging:
+     dependency: transitive
+     description:
+@@ -764,6 +822,14 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "7.4.2"
++  native_toolchain_c:
++    dependency: transitive
++    description:
++      name: native_toolchain_c
++      sha256: "120b6fc66acd8a5ddeaeb1e59b78836bb3ec9919bd9d9dfb1e2401985710c2c0"
++      url: "https://pub.dev"
++    source: hosted
++    version: "0.19.6"
+   nested:
+     dependency: transitive
+     description:
+@@ -907,6 +973,14 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "2.1.8"
++  posix:
++    dependency: transitive
++    description:
++      name: posix
++      sha256: "613646d076944f3acc125830af935b48d4b8a57a388691547bbfd25b434f4d63"
++      url: "https://pub.dev"
++    source: hosted
++    version: "6.5.4"
+   process:
+     dependency: transitive
+     description:
+@@ -1156,10 +1230,10 @@ packages:
+     dependency: transitive
+     description:
+       name: test_api
+-      sha256: "2a122cbe059f8b610d3a5415f42e255b6c17b1f21eee1d960f31080237fb4f11"
++      sha256: "0a10344e901e5b2e63819567951cb6a06673ed6b84f40462188ff5a0c41f371f"
+       url: "https://pub.dev"
+     source: hosted
+-    version: "0.7.12"
++    version: "0.7.14"
+   typed_data:
+     dependency: transitive
+     description:
