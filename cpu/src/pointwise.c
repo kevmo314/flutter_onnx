@@ -85,6 +85,11 @@ static float expanded_gelu(float value) {
 #endif
 
 #ifdef __APPLE__
+typedef struct {
+  BNNSFilter product;
+  float bias[];
+} dense_filter;
+
 // BNNS copies both parameters into the filter unless BNNSFlagsUseClientPtr
 // is requested. The caller can release its temporary weights after creation.
 EXPORT void *onnx_fc_create(const float *weights, const float *bias,
@@ -102,22 +107,32 @@ EXPORT void *onnx_fc_create(const float *weights, const float *bias,
                    .size = {channels, filters},
                    .data = (void *)weights},
         .activation = {.function = BNNSActivationFunctionIdentity}};
-    if (bias) {
-      layer.bias = (BNNSNDArrayDescriptor){.layout = BNNSDataLayoutVector,
-                                           .data_type = BNNSDataTypeFloat32,
-                                           .size = {filters},
-                                           .data = (void *)bias};
-    }
     BNNSFilterParameters params = {.n_threads = threads};
-    return BNNSFilterCreateLayerFullyConnected(&layer, &params);
+    dense_filter *prepared =
+        calloc(1, sizeof(*prepared) + (size_t)filters * sizeof(float));
+    if (!prepared)
+      return NULL;
+    prepared->product = BNNSFilterCreateLayerFullyConnected(&layer, &params);
+    if (!prepared->product) {
+      free(prepared);
+      return NULL;
+    }
+    if (bias)
+      memcpy(prepared->bias, bias, (size_t)filters * sizeof(float));
+    return prepared;
   }
   return NULL;
 }
 
-EXPORT void onnx_fc_destroy(void *filter) { BNNSFilterDestroy(filter); }
+EXPORT void onnx_fc_destroy(void *handle) {
+  dense_filter *filter = handle;
+  BNNSFilterDestroy(filter->product);
+  free(filter);
+}
 
 EXPORT int onnx_fc_run(void *filter, const float *x, float *y, int batch,
                        int channels, int width, int filters, int gelu) {
+  const dense_filter *prepared = filter;
   size_t nx = (size_t)channels * width, ny = (size_t)filters * width;
   const int repeated = batch == 2 && memcmp(x, x + nx, nx * sizeof(float)) == 0;
   if (repeated)
@@ -132,11 +147,18 @@ EXPORT int onnx_fc_run(void *filter, const float *x, float *y, int batch,
   for (int b = 0; b < batch; ++b)
     vDSP_mtrans(x + b * nx, 1, samples + b * nx, 1, width, channels);
   const int success =
-      BNNSFilterApplyBatch(filter, (size_t)batch * width, samples, channels,
-                           products, filters) == 0;
+      BNNSFilterApplyBatch(prepared->product, (size_t)batch * width, samples,
+                           channels, products, filters) == 0;
   if (success) {
     for (int b = 0; b < batch; ++b)
       vDSP_mtrans(products + b * ny, 1, y + b * ny, 1, filters, width);
+    for (int b = 0; b < batch; ++b) {
+      for (int f = 0; f < filters; ++f) {
+        float *row = y + b * ny + (size_t)f * width;
+        for (int t = 0; t < width; ++t)
+          row[t] += prepared->bias[f];
+      }
+    }
     if (gelu)
       activate_span(y, batch * ny);
     if (repeated)
