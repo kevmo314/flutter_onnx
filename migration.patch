@@ -96,10 +96,10 @@ index 0000000..8bed4ef
 +install_package 'system-images;android-35;google_apis;x86_64' "$sdk/system-images/android-35/google_apis/x86_64/system.img"
 diff --git a/.github/scripts/profile-supertonic-device.sh b/.github/scripts/profile-supertonic-device.sh
 new file mode 100644
-index 0000000..4d9edad
+index 0000000..c8ace1d
 --- /dev/null
 +++ b/.github/scripts/profile-supertonic-device.sh
-@@ -0,0 +1,131 @@
+@@ -0,0 +1,134 @@
 +#!/usr/bin/env bash
 +# Run from the RTChat app root with the model staged on the runner.
 +set -euo pipefail
@@ -225,8 +225,11 @@ index 0000000..4d9edad
 +rounds = [r for r in results if "round" in r]
 +if audio <= 0 or [r["round"] for r in rounds] != [1, 2, 3]:
 +    raise SystemExit(f"Incomplete profile: {results}")
++baseline = [r for r in results if r.get("unsplit")]
++if len(baseline) != 1 or not 0 < baseline[0]["last_pcm_ready_ms"] <= baseline[0]["first_audio_ms"] < baseline[0]["done_ms"]:
++    raise SystemExit(f"Invalid whole-message baseline: {baseline}")
 +for row in rounds:
-+    if not (0 < row["first_audio_ms"] < row["done_ms"]) or row["done_ms"] <= audio - 50:
++    if not (0 < row["first_audio_ms"] < row["last_pcm_ready_ms"] < row["done_ms"]) or row["done_ms"] <= audio - 50:
 +        raise SystemExit(f"Unexpected playback events: {row}")
 +    if row["round"] > 1 and not audio - 50 < row["speak_ms"] < audio + 10_000:
 +        raise SystemExit(f"Missed the playback deadline for {audio:.0f} ms of audio: {row}")
@@ -506,7 +509,7 @@ index 2a93a30..1d3c6c0 100644
 +          path: ${{ runner.temp }}/playback-*.jsonl
 +          if-no-files-found: ignore
 diff --git a/integration_test/on_device_tts_test.dart b/integration_test/on_device_tts_test.dart
-index a92a152..3d44cd2 100644
+index a92a152..e1fe841 100644
 --- a/integration_test/on_device_tts_test.dart
 +++ b/integration_test/on_device_tts_test.dart
 @@ -1,4 +1,4 @@
@@ -595,12 +598,45 @@ index a92a152..3d44cd2 100644
      final manifest =
          jsonDecode(manifestFile.readAsStringSync()) as Map<String, dynamic>;
      for (final c in manifest['cases'] as List) {
+@@ -202,7 +231,9 @@ void main() {
+     }
+   });
+ 
+-  testWidgets('speaks segments and completes after playback', (_) async {
++  testWidgets('streams a single chat message before its final PCM is ready', (
++    _,
++  ) async {
+     const segments = [
+       'Daisy said,',
+       'that was the cleanest clutch I have seen all week,',
+@@ -219,8 +250,8 @@ void main() {
+     final events = <OnnxTtsEvent>[];
+     final sub = tts.events.listen(events.add);
+     final stopwatch = Stopwatch()..start();
+-    await tts.speak(
+-      segments,
++    await tts.speakText(
++      segments.join(' '),
+       language: 'en',
+       voiceId: 'M2',
+       utteranceId: 'three',
+@@ -236,7 +267,9 @@ void main() {
+     expect(events.every((e) => e.utteranceId == 'three'), isTrue);
+     final firstAudio = events[0].elapsed;
+     final done = events[1].elapsed;
+-    expect(firstAudio, lessThan(done));
++    final lastPcmReady = events[1].lastPcmReady!;
++    expect(firstAudio, lessThan(lastPcmReady));
++    expect(lastPcmReady, lessThan(done));
+     // Completion follows the playback head, so it can't come before the
+     // audio has played.
+     expect(done, greaterThan(audioLength - const Duration(milliseconds: 50)));
 diff --git a/integration_test/profile_playback.dart b/integration_test/profile_playback.dart
 new file mode 100644
-index 0000000..a4c6ea2
+index 0000000..608625c
 --- /dev/null
 +++ b/integration_test/profile_playback.dart
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,118 @@
 +// Flutter entry point for a cold and two warm runs through the native player.
 +// Stage supertonic-3 in the app's documents directory.
 +import 'dart:convert';
@@ -633,17 +669,28 @@ index 0000000..a4c6ea2
 +    final tts = await OnnxTts.load(modelDir: '${dir.path}/supertonic-3');
 +    record({'load_ms': load.elapsedMilliseconds});
 +    try {
-+      for (var round = 1; round <= 3; round++) {
-+        final id = 'profile-$round';
++      final message = segments.join(' ');
++      // The last run presents exactly the same words as one model input.
++      for (final round in <int?>[1, 2, 3, null]) {
++        final id = round == null ? 'unsplit' : 'profile-$round';
 +        final events = tts.events.where((e) => e.utteranceId == id).take(2);
 +        final received = events.toList().timeout(const Duration(minutes: 10));
 +        final clock = Stopwatch()..start();
-+        await tts.speak(
-+          segments,
-+          language: 'en',
-+          voiceId: 'M2',
-+          utteranceId: id,
-+        );
++        if (round == null) {
++          await tts.speak(
++            [message],
++            language: 'en',
++            voiceId: 'M2',
++            utteranceId: id,
++          );
++        } else {
++          await tts.speakText(
++            message,
++            language: 'en',
++            voiceId: 'M2',
++            utteranceId: id,
++          );
++        }
 +        final wall = clock.elapsedMilliseconds;
 +        final playback = await received;
 +        final first = playback.singleWhere(
@@ -653,8 +700,9 @@ index 0000000..a4c6ea2
 +          (e) => e.type == OnnxTtsEventType.done,
 +        );
 +        record({
-+          'round': round,
++          if (round == null) 'unsplit': true else 'round': round,
 +          'first_audio_ms': first.elapsed.inMilliseconds,
++          'last_pcm_ready_ms': done.lastPcmReady!.inMilliseconds,
 +          'done_ms': done.elapsed.inMilliseconds,
 +          'speak_ms': wall,
 +        });
@@ -666,14 +714,13 @@ index 0000000..a4c6ea2
 +        var audioSeconds = 0.0;
 +        final segmentMicros = <int>[];
 +        final segmentRtf = <double>[];
-+        for (var i = 0; i < segments.length; i++) {
-+          final clock = Stopwatch()..start();
-+          final audio = await tts.synthesize(
-+            segments[i],
-+            language: 'en',
-+            voiceId: 'M2',
-+            noiseSeed: 3 * round + i,
-+          );
++        final clock = Stopwatch()..start();
++        await for (final audio in tts.synthesizeStream(
++          message,
++          language: 'en',
++          voiceId: 'M2',
++          noiseSeed: 3 * round,
++        )) {
 +          clock.stop();
 +          final seconds = audio.pcm.length / audio.sampleRate;
 +          if (seconds <= 0) throw StateError('Empty audio for segment $i');
@@ -681,6 +728,13 @@ index 0000000..a4c6ea2
 +          audioSeconds += seconds;
 +          segmentMicros.add(clock.elapsedMicroseconds);
 +          segmentRtf.add(clock.elapsedMicroseconds / (1e6 * seconds));
++          clock.reset();
++          clock.start();
++        }
++        if (segmentMicros.length != segments.length || samples != 297611) {
++          throw StateError(
++            'Unexpected streaming output: ${segmentMicros.length} phrases, $samples samples',
++          );
 +        }
 +        final micros = segmentMicros.reduce((a, b) => a + b);
 +        record({
@@ -824,7 +878,7 @@ index 563fe88..0000000
 -    args = parser.parse_args()
 -    repair(args.app)
 diff --git a/packages/on_device_tts/README.md b/packages/on_device_tts/README.md
-index b006cb0..48fbd7e 100644
+index b006cb0..3537c7a 100644
 --- a/packages/on_device_tts/README.md
 +++ b/packages/on_device_tts/README.md
 @@ -3,9 +3,7 @@
@@ -859,6 +913,23 @@ index b006cb0..48fbd7e 100644
  
  ## NeuralTtsEngine
  
+@@ -51,9 +49,13 @@ await engine.release(); // frees the model; the next speak loads it again
+ await engine.dispose();
+ ```
+ 
+-`speak` passes the whole message to the native `speak` as one segment; the
+-native engine splits text over 300 code units (120 for Japanese and Korean)
+-itself and streams the audio out as it is synthesized.
++`speak` calls `OnnxTts.speakText` to play a message in phrases. The native
++player starts with the first phrase and buffers subsequent PCM as inference
++finishes. All phrases share the same utterance ID and stop together.
++`OnnxTts.speak` also accepts explicit segments for callers that choose their own
++boundaries. Phrasing can affect the model’s prosody and predicted duration.
++For a custom audio output, `OnnxTts.synthesizeStream` yields each phrase as
++mono float32 PCM with its sample rate. Enqueue each chunk as it arrives.
+ 
+ `rate` (0..1, 0.5 normal) maps to the native speed as `2 × rate` clamped to
+ 0.7..2.0, the way `flutter_tts` maps it to Android's speech rate. `pitch` is
 diff --git a/packages/on_device_tts/android/build.gradle.kts b/packages/on_device_tts/android/build.gradle.kts
 index 52603ba..f8b1436 100644
 --- a/packages/on_device_tts/android/build.gradle.kts
@@ -963,7 +1034,7 @@ index f1a0119..32618a4 100644
          methods = MethodChannel(binding.binaryMessenger, OnnxTtsChannelHandler.METHOD_CHANNEL).also {
              it.setMethodCallHandler { call, result ->
 diff --git a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/OnnxTtsChannelHandler.kt b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/OnnxTtsChannelHandler.kt
-index 30d67db..562de1c 100644
+index 30d67db..51c37cb 100644
 --- a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/OnnxTtsChannelHandler.kt
 +++ b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/OnnxTtsChannelHandler.kt
 @@ -1,15 +1,11 @@
@@ -1044,18 +1115,57 @@ index 30d67db..562de1c 100644
                      model.synthesize(
                          segment, request.lang, request.voice, request.speed, request.steps,
 -                        NoiseGenerator(random.nextLong()), utterance.runOptions,
+-                    ) { utterance.queue.put(Chunk.Audio(it)) }
 +                        NoiseGenerator(random.nextLong()), { utterance.cancelled },
-                     ) { utterance.queue.put(Chunk.Audio(it)) }
++                    ) { pcm -> utterance.enqueue(Chunk.Audio(pcm, SystemClock.elapsedRealtimeNanos())) }
                  }
-                 utterance.queue.put(Chunk.End)
+-                utterance.queue.put(Chunk.End)
++                utterance.enqueue(Chunk.End)
              } catch (e: Throwable) {
-                 utterance.queue.put(if (utterance.cancelled) Chunk.End else Chunk.Failed(e))
+-                utterance.queue.put(if (utterance.cancelled) Chunk.End else Chunk.Failed(e))
 -            } finally {
 -                utterance.closeRunOptions()
++                utterance.enqueue(Chunk.Failed(e))
              }
          }
  
-@@ -273,12 +261,10 @@ internal class OnnxTtsChannelHandler(
+@@ -198,6 +186,7 @@ internal class OnnxTtsChannelHandler(
+                 if (utterance.cancelled) break
+                 when (val chunk = utterance.queue.poll(50, TimeUnit.MILLISECONDS) ?: continue) {
+                     is Chunk.Audio -> {
++                        utterance.lastPcmReadyNanos = chunk.readyNanos
+                         if (!player.write(chunk.pcm, announce)) break
+                     }
+                     is Chunk.End -> {
+@@ -248,15 +237,24 @@ internal class OnnxTtsChannelHandler(
+     }
+ 
+     private fun emit(utterance: Utterance, type: String) {
+-        main.post { sendEvent(utterance, type) }
++        val at = SystemClock.elapsedRealtimeNanos()
++        main.post { sendEvent(utterance, type, at = at) }
+     }
+ 
+-    private fun sendEvent(utterance: Utterance, type: String, message: String? = null) {
++    private fun sendEvent(
++        utterance: Utterance,
++        type: String,
++        message: String? = null,
++        at: Long = SystemClock.elapsedRealtimeNanos(),
++    ) {
+         val event = mutableMapOf<String, Any>(
+             "utteranceId" to utterance.id,
+             "type" to type,
+-            "elapsedMs" to (SystemClock.elapsedRealtimeNanos() - utterance.requestedNanos) / 1_000_000,
++            "elapsedMs" to (at - utterance.requestedNanos) / 1_000_000,
+         )
++        if (type == "done") utterance.lastPcmReadyNanos?.let {
++            event["lastPcmReadyMs"] = (it - utterance.requestedNanos) / 1_000_000
++        }
+         if (message != null) event["message"] = message
+         sink?.success(event)
+     }
+@@ -273,12 +271,10 @@ internal class OnnxTtsChannelHandler(
          synthesis.execute {
              try {
                  val pieces = ArrayList<FloatArray>()
@@ -1072,15 +1182,33 @@ index 30d67db..562de1c 100644
                  val pcm = FloatArray(pieces.sumOf { it.size })
                  var offset = 0
                  for (piece in pieces) {
-@@ -360,7 +346,6 @@ internal class OnnxTtsChannelHandler(
+@@ -341,7 +337,7 @@ internal class OnnxTtsChannelHandler(
+     private fun MethodCall.int(name: String): Int? = argument<Number>(name)?.toInt()
+ 
+     private sealed class Chunk {
+-        class Audio(val pcm: FloatArray) : Chunk()
++        class Audio(val pcm: FloatArray, val readyNanos: Long) : Chunk()
+         object End : Chunk()
+         class Failed(val error: Throwable) : Chunk()
+     }
+@@ -359,8 +355,14 @@ internal class OnnxTtsChannelHandler(
+         /** Keeps the CPU awake until the utterance has finished. */
          val hold: AutoCloseable,
      ) {
-         val queue = LinkedBlockingQueue<Chunk>()
+-        val queue = LinkedBlockingQueue<Chunk>()
 -        val runOptions = OrtSession.RunOptions()
++        val queue = LinkedBlockingQueue<Chunk>(2)
++        var lastPcmReadyNanos: Long? = null
++
++        fun enqueue(chunk: Chunk) {
++            while (!cancelled) {
++                if (queue.offer(chunk, 50, TimeUnit.MILLISECONDS)) return
++            }
++        }
  
          @Volatile
          var cancelled = false
-@@ -368,23 +353,11 @@ internal class OnnxTtsChannelHandler(
+@@ -368,23 +370,12 @@ internal class OnnxTtsChannelHandler(
          @Volatile
          var player: PcmPlayer? = null
  
@@ -1092,6 +1220,7 @@ index 30d67db..562de1c 100644
 -                // Aborts the ONNX Runtime run in flight.
 -                if (!runOptionsClosed) runOptions.setTerminate(true)
 -            }
++            queue.clear()
              player?.halt()
          }
  
@@ -1104,6 +1233,19 @@ index 30d67db..562de1c 100644
      }
  
      private fun executor(name: String, priority: Int): ExecutorService =
+diff --git a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/PcmPlayer.kt b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/PcmPlayer.kt
+index c5788f6..e3df539 100644
+--- a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/PcmPlayer.kt
++++ b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/PcmPlayer.kt
+@@ -70,7 +70,7 @@ internal class PcmPlayer(val sampleRate: Int) {
+             if (written < 0) throw IllegalStateException("AudioTrack.write failed: $written")
+             offset += written
+             framesWritten += written
+-            onWritten()
++            if (written > 0) onWritten()
+         }
+         return !halted
+     }
 diff --git a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/supertonic/ExecutionProviders.kt b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/supertonic/ExecutionProviders.kt
 deleted file mode 100644
 index 16a9ccd..0000000
@@ -1588,7 +1730,7 @@ index bca516c..4c22e8b 100644
  ## Audio robustness
  
 diff --git a/packages/on_device_tts/doc/native_contract.md b/packages/on_device_tts/doc/native_contract.md
-index 0f68bd4..3bc2a6f 100644
+index 0f68bd4..19f68b6 100644
 --- a/packages/on_device_tts/doc/native_contract.md
 +++ b/packages/on_device_tts/doc/native_contract.md
 @@ -1,7 +1,7 @@
@@ -1640,7 +1782,15 @@ index 0f68bd4..3bc2a6f 100644
  then completes normally (`null`), and a `stopped` event is sent. Without an
  active utterance it does nothing.
  
-@@ -194,15 +183,9 @@ after it.
+@@ -182,6 +171,7 @@ Each event is a map:
+ |---|---|---|
+ | `utteranceId` | `String` | from `speak` |
+ | `type` | `String` | `firstAudio`, `done`, `stopped` or `error` |
++| `lastPcmReadyMs` | `int?` | time after the request when inference produced the final PCM chunk, included on `done` when audio was generated |
+ | `elapsedMs` | `int` | milliseconds since the native side received the `speak` call |
+ | `message` | `String?` | for `error`, and for `stopped` when the engine stopped the utterance itself |
+ 
+@@ -194,15 +184,9 @@ after it.
  
  ## Threads and power
  
@@ -1659,7 +1809,7 @@ index 0f68bd4..3bc2a6f 100644
  * **Wake lock (Android).** A partial wake lock (`on_device_tts:speak`) is
    held while a model loads and from `speak` until its terminal event, with a
    10-minute timeout per hold; never between utterances. With the screen off
-@@ -329,6 +312,9 @@ PRNG and writes every intermediate tensor (`text_ids`, `duration`,
+@@ -329,6 +313,9 @@ PRNG and writes every intermediate tensor (`text_ids`, `duration`,
  `text_emb`, `noise`, `latent_<step>`, `wav`) and the trimmed PCM, with a
  `manifest.json`. Platform tests compare against it:
  
@@ -1669,65 +1819,50 @@ index 0f68bd4..3bc2a6f 100644
  * Android JVM: `SUPERTONIC_PARITY_DIR=<dir> ./gradlew
    :on_device_tts:testDebugUnitTest` from the app's `android/`
    (`ReferenceParityTest`, desktop ONNX Runtime).
-@@ -339,3 +325,58 @@ Expected: fp32 output within 1e-3 max abs difference of the reference (bit
+@@ -339,3 +326,43 @@ Expected: fp32 output within 1e-3 max abs difference of the reference (bit
  exact on the same ONNX Runtime CPU build). int8 models are only comparable
  on the same CPU and build: ONNX Runtime's quantized kernels differ between
  builds, and the differences grow through the flow-matching steps.
 +
 +## Playback latency
 +
-+The integration test speaks three English segments with Supertonic 3, voice M2,
-+five steps and speed 1. They produce 6.75 seconds of mono audio at 44.1 kHz.
-+The deadline is the measured audio duration plus 10 seconds. The profiler starts
-+the speech clock after loading the model, collects the native `firstAudio` and
-+`done` events, and times the return of `speak`. It repeats the same workload twice
-+with the loaded engine. Each run synthesizes fresh PCM.
++The device test streams one English chat message in three phrases with Supertonic 3, voice M2,
++speed 1 and five denoising steps. They produce 297,611 mono samples at
++44.1 kHz, or 6.749 seconds of audio. The app records model load separately,
++then measures the native player's first-audio and completion events for the
++first utterance and two warm repetitions. Every run requires the first-audio
++event to precede the production of the final PCM chunk. A separate warm run
++keeps the same message in a single segment for a startup comparison.
++The completion time includes
++playback. Acoustic latency requires a physical device and an audio capture.
 +
-+The following measurements use the app and player on GitHub-hosted devices.
-+Android ran an AOT Flutter profile build on an API 35 x86-64 emulator. iOS ran
-+a Flutter debug build on an Apple-silicon iPhone simulator. Model load took
-+10.00 seconds on Android and 4.98 seconds on iOS. The clocks below start after
-+load. The first Android warm run exceeded the deadline. Both iOS warm runs
-+passed.
++The profiler then calls the public synthesis API for each segment with fresh
++noise seeds. It divides the elapsed synthesis time in each round by the
++duration of the returned PCM. CI requires a real-time factor below 1 in all
++three rounds. The JSONL artifact contains the individual segment factors,
++the total for each round, and the player event times. On Android the app
++runs as an AOT profile build on an API 35 x86-64 emulator. On iOS it runs
++as a debug build on an Apple Silicon iPhone simulator.
 +
-+| Run | Android first audio | Android done | iOS first audio | iOS done |
-+| --- | ---: | ---: | ---: | ---: |
-+| First after loading | 7.18 s | 33.07 s | 6.36 s | 17.61 s |
-+| Warm 1 | 5.89 s | 20.21 s | 3.82 s | 16.16 s |
-+| Warm 2 | 3.26 s | 13.75 s | 3.94 s | 15.46 s |
++On the Android emulator the migrated app generated the full 6.749 seconds of
++speech in 3.40–3.63 seconds (real-time factor 0.50–0.54). Model load took
++2.52 seconds. After warm-up the first-audio event arrived in 0.83–0.88
++seconds and playback completed in 7.91–7.93 seconds. The debug integration test
++passed all five multilingual reference waveforms using the same runtime
++revision. The largest absolute sample error was 0.0006361.
 +
-+[Native player measurements and raw profiles](https://github.com/kevmo314/flutter_onnx/actions/runs/45450023249)
++[Android device tests and playback timings](https://github.com/kevmo314/flutter_onnx/actions/runs/45502140362/job/138827892137) · [Device test and profiling scripts](../../../.github/scripts/)
 +
-+A second Android comparison installed each AOT build on the same emulator. Both
-+runs waited for three successive five-second samples above 75% guest CPU idle.
-+On this runner model load took 4.33 seconds for flutter_onnx and 4.09 seconds
-+for the original engine. Of the two warm flutter_onnx runs, one exceeded the
-+deadline by 0.60 seconds and the other passed by 0.25 seconds.
++An early trace attributed 86% of graph execution time to the denoiser.
++That measurement guided the optimized convolution and activation kernels.
++With the original runtime, warm first audio took 0.50 seconds on Android
++and 0.95–1.14 seconds on iOS in separate CI runs. On the runtime's native
++CPU workflow, a standalone Dart AOT benchmark also reports time spent in the
++duration predictor, text encoder, denoiser and vocoder. That benchmark
++compares all three segments sample by sample with Supertone, including their
++exact trimmed lengths.
 +
-+| Android build | First audio after load | Done after load | Warm first audio | Warm done |
-+| --- | ---: | ---: | ---: | ---: |
-+| flutter_onnx | 5.20 s | 18.26 s | 3.85–3.95 s | 16.50–17.35 s |
-+| Original | 0.60 s | 7.36 s | 0.50 s | 7.26–7.28 s |
-+
-+Across 12 synthesized segments the Dart workers spent 51.87 seconds in the
-+60 denoising passes, 7.31 seconds in the vocoder, 0.89 seconds in text encoding,
-+and 0.21 seconds in duration prediction. The denoiser used 86% of measured graph
-+execution time.
-+
-+[Same-emulator comparison and per-graph trace](https://github.com/kevmo314/flutter_onnx/actions/runs/45452282279)
-+
-+On the original engine, a separate iOS simulator run gave 0.95–1.14 seconds
-+to first audio and 8.09–9.90 seconds to completion after warm-up. The
-+comparison used the original Swift wrapper and verified 1.24.2 binary checksums
-+from the archive mirror. The migrated engine trimmed the middle segment one
-+sample shorter than the original, a difference of 23 microseconds.
-+
-+[Original iOS player measurements](https://github.com/kevmo314/flutter_onnx/actions/runs/45447762116/job/138636123365)
-+
-+The native CPU workflow also records duration-predictor, text-encoder, denoiser
-+and vocoder times using deterministic inputs. Its queue-drain estimate excludes
-+the Flutter bridge and OS audio buffering. The device profile uses the actual
-+player. Both workflows retain the raw timings as artifacts.
++[Initial Android comparison and graph trace](https://github.com/kevmo314/flutter_onnx/actions/runs/45452282279) · [Original iOS player measurements](https://github.com/kevmo314/flutter_onnx/actions/runs/45447762116/job/138636123365)
 diff --git a/packages/on_device_tts/ios/on_device_tts.podspec b/packages/on_device_tts/ios/on_device_tts.podspec
 index d49ee58..29976d6 100644
 --- a/packages/on_device_tts/ios/on_device_tts.podspec
@@ -1797,7 +1932,7 @@ index c3167db..d8e985e 100644
      ),
    ]
 diff --git a/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/OnnxTtsEngine.swift b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/OnnxTtsEngine.swift
-index 81aaa35..22a3ac3 100644
+index 81aaa35..569ae5a 100644
 --- a/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/OnnxTtsEngine.swift
 +++ b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/OnnxTtsEngine.swift
 @@ -54,11 +54,10 @@ public final class OnnxTtsEngine {
@@ -1835,6 +1970,51 @@ index 81aaa35..22a3ac3 100644
              return handle
            })
        }
+@@ -238,9 +235,10 @@ public final class OnnxTtsEngine {
+             segment, language: language, voice: voice, speed: speed, steps: steps,
+             noise: &noise, isCancelled: { job.cancellation.isCancelled }
+           ) { pcm in
+-            // Keep at most two buffers queued ahead of synthesis.
++            let ready = DispatchTime.now()
++            // Keep at most two buffers scheduled ahead of playback.
+             if !job.ahead.acquire() { throw SupertonicError.cancelled }
+-            DispatchQueue.main.async { self.enqueue(pcm, for: job, on: output) }
++            DispatchQueue.main.async { self.enqueue(pcm, ready: ready, for: job, on: output) }
+           }
+         }
+         DispatchQueue.main.async {
+@@ -298,11 +296,12 @@ public final class OnnxTtsEngine {
+     }
+   }
+ 
+-  private func enqueue(_ pcm: [Float], for job: SpeakJob, on output: PcmOutput) {
++  private func enqueue(_ pcm: [Float], ready: DispatchTime, for job: SpeakJob, on output: PcmOutput) {
+     guard current === job, !job.cancellation.isCancelled else { return }
+     // When this buffer should have finished playing: after what is still
+     // queued, or from now if nothing is.
+     let now = DispatchTime.now()
++    job.lastPcmReady = ready
+     let startsAt = job.pendingBuffers > 0 ? max(job.playedBy, now) : now
+     job.playedBy = startsAt + Double(pcm.count) / Double(job.sampleRate)
+     job.pendingBuffers += 1
+@@ -387,6 +386,9 @@ public final class OnnxTtsEngine {
+       "type": type,
+       "elapsedMs": Int((DispatchTime.now().uptimeNanoseconds - job.start.uptimeNanoseconds) / 1_000_000),
+     ]
++    if type == "done", let ready = job.lastPcmReady {
++      event["lastPcmReadyMs"] = Int((ready.uptimeNanoseconds - job.start.uptimeNanoseconds) / 1_000_000)
++    }
+     if let message = message { event["message"] = message }
+     onEvent?(event)
+   }
+@@ -467,6 +469,7 @@ final class SpeakJob {
+   let cancellation = Cancellation()
+   let ahead = Gate(limit: 2)
+   let sampleRate: Int
++  var lastPcmReady: DispatchTime?
+   var pendingBuffers = 0
+   /// When the audio scheduled so far should have finished playing.
+   var playedBy = DispatchTime.now()
 diff --git a/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/Supertonic/GraphSession.swift b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/Supertonic/GraphSession.swift
 new file mode 100644
 index 0000000..343fdd4
@@ -2349,6 +2529,41 @@ index 36d8f30..af615a2 100644
      engine.shutdown()
    }
  
+diff --git a/packages/on_device_tts/lib/src/neural_tts_engine.dart b/packages/on_device_tts/lib/src/neural_tts_engine.dart
+index 56a8705..011aace 100644
+--- a/packages/on_device_tts/lib/src/neural_tts_engine.dart
++++ b/packages/on_device_tts/lib/src/neural_tts_engine.dart
+@@ -31,16 +31,14 @@ class NeuralTtsLoadException extends NeuralTtsException {
+ }
+ 
+ /// Speaks with an installed neural voice pack, synthesized on the device by
+-/// the native ONNX Runtime engine ([OnnxTts]).
++/// the flutter_onnx graph workers and native player ([OnnxTts]).
+ ///
+ /// The model loads on the first [speak] (or [load]) and stays loaded, so
+ /// later utterances start quickly. [release] unloads it to free memory, and
+ /// the next [speak] loads it again; [dispose] unloads it for good.
+ ///
+-/// [speak] hands the whole text to the native engine as one segment. The
+-/// native side synthesizes it, splitting text longer than 300 UTF-16 code
+-/// units (120 for Japanese and Korean) itself, and streams the audio out as
+-/// it is made.
++/// [speak] starts playing the first phrase while subsequent phrases are
++/// synthesized. One utterance ID covers the whole message.
+ ///
+ /// The native side plays one utterance at a time for every engine, so don't
+ /// [speak] on two engines at once.
+@@ -168,8 +166,8 @@ class NeuralTtsEngine implements TtsEngine {
+     final id = '$_utterancePrefix${_nextUtterance++}';
+     _activeUtterance = id;
+     try {
+-      await model.speak(
+-        [message],
++      await model.speakText(
++        message,
+         language: lang,
+         voiceId: voiceId,
+         speed: speedForRate(rate),
 diff --git a/packages/on_device_tts/lib/src/onnx/graph_worker.dart b/packages/on_device_tts/lib/src/onnx/graph_worker.dart
 new file mode 100644
 index 0000000..9ee228f
@@ -2514,19 +2729,78 @@ index 0000000..43271ef
 @@ -0,0 +1 @@
 +void installGraphHandler() {}
 diff --git a/packages/on_device_tts/lib/src/onnx/onnx_tts.dart b/packages/on_device_tts/lib/src/onnx/onnx_tts.dart
-index 86392bb..526b01e 100644
+index 86392bb..35b07c5 100644
 --- a/packages/on_device_tts/lib/src/onnx/onnx_tts.dart
 +++ b/packages/on_device_tts/lib/src/onnx/onnx_tts.dart
-@@ -1,6 +1,6 @@
+@@ -1,6 +1,7 @@
  import 'onnx_tts_platform.dart';
++import 'playback_phrases.dart';
  
 -/// A neural TTS model running natively on ONNX Runtime.
 +/// A loaded neural speech model backed by flutter_onnx.
  ///
  /// ```dart
  /// final tts = await OnnxTts.load(modelDir: '/path/to/supertonic-3');
+@@ -41,6 +42,24 @@ class OnnxTts {
+ 
+   Future<List<OnnxVoice>> voices() => _platform.voices(handle);
+ 
++  /// Streams a message in phrases under a single utterance ID. The player
++  /// starts with the first phrase while inference continues on the rest.
++  Future<void> speakText(
++    String text, {
++    required String language,
++    required String voiceId,
++    double speed = 1.0,
++    int steps = 5,
++    String? utteranceId,
++  }) => speak(
++    playbackPhrases(text.trim(), language),
++    language: language,
++    voiceId: voiceId,
++    speed: speed,
++    steps: steps,
++    utteranceId: utteranceId,
++  );
++
+   /// Speaks [segments] (e.g. the clauses of a message) back to back, and
+   /// completes when the last one has finished playing or [stop] cut it off.
+   ///
+@@ -83,6 +102,32 @@ class OnnxTts {
+     noiseSeed: noiseSeed,
+   );
+ 
++  /// Yields mono float PCM as each phrase finishes. Enqueue each chunk in
++  /// the audio sink so synthesis can continue during playback. Pausing or
++  /// cancelling the subscription prevents subsequent phrase requests.
++  /// A supplied [noiseSeed] advances by one per phrase.
++  Stream<OnnxSynthesis> synthesizeStream(
++    String text, {
++    required String language,
++    required String voiceId,
++    double speed = 1.0,
++    int steps = 5,
++    int? noiseSeed,
++  }) async* {
++    var seed = noiseSeed;
++    for (final phrase in playbackPhrases(text.trim(), language)) {
++      yield await synthesize(
++        phrase,
++        language: language,
++        voiceId: voiceId,
++        speed: speed,
++        steps: steps,
++        noiseSeed: seed,
++      );
++      if (seed != null) seed++;
++    }
++  }
++
+   /// Stops the utterance being spoken, if any.
+   Future<void> stop() => _platform.stop();
+ 
 diff --git a/packages/on_device_tts/lib/src/onnx/onnx_tts_platform.dart b/packages/on_device_tts/lib/src/onnx/onnx_tts_platform.dart
-index 9707708..bd791ed 100644
+index 9707708..a3fe203 100644
 --- a/packages/on_device_tts/lib/src/onnx/onnx_tts_platform.dart
 +++ b/packages/on_device_tts/lib/src/onnx/onnx_tts_platform.dart
 @@ -2,11 +2,11 @@ import 'package:flutter/foundation.dart';
@@ -2544,7 +2818,50 @@ index 9707708..bd791ed 100644
  enum OnnxProvider {
    cpu,
  
-@@ -164,6 +164,7 @@ class OnnxTtsPlatform {
+@@ -87,12 +87,17 @@ class OnnxTtsEvent {
+ 
+   /// Time since the `speak` call.
+   final Duration elapsed;
++
++  /// Time since the request when inference produced the final PCM chunk.
++  /// Present on completed utterances from players that report it.
++  final Duration? lastPcmReady;
+   final String? message;
+ 
+   const OnnxTtsEvent({
+     required this.utteranceId,
+     required this.type,
+     required this.elapsed,
++    this.lastPcmReady,
+     this.message,
+   });
+ 
+@@ -107,6 +112,10 @@ class OnnxTtsEvent {
+       utteranceId: map['utteranceId'] as String,
+       type: type,
+       elapsed: Duration(milliseconds: (map['elapsedMs'] as num).toInt()),
++      lastPcmReady: switch (map['lastPcmReadyMs']) {
++        num ms => Duration(milliseconds: ms.toInt()),
++        _ => null,
++      },
+       message: map['message'] as String?,
+     );
+   }
+@@ -117,10 +126,12 @@ class OnnxTtsEvent {
+       other.utteranceId == utteranceId &&
+       other.type == type &&
+       other.elapsed == elapsed &&
++      other.lastPcmReady == lastPcmReady &&
+       other.message == message;
+ 
+   @override
+-  int get hashCode => Object.hash(utteranceId, type, elapsed, message);
++  int get hashCode =>
++      Object.hash(utteranceId, type, elapsed, lastPcmReady, message);
+ 
+   @override
+   String toString() =>
+@@ -164,6 +175,7 @@ class OnnxTtsPlatform {
      int numThreads = 2,
      OnnxProvider provider = OnnxProvider.cpu,
    }) async {
@@ -2552,6 +2869,51 @@ index 9707708..bd791ed 100644
      final handle = await _methods.invokeMethod<String>('load', {
        'modelType': modelType,
        'modelDir': modelDir,
+diff --git a/packages/on_device_tts/lib/src/onnx/playback_phrases.dart b/packages/on_device_tts/lib/src/onnx/playback_phrases.dart
+new file mode 100644
+index 0000000..68db249
+--- /dev/null
++++ b/packages/on_device_tts/lib/src/onnx/playback_phrases.dart
+@@ -0,0 +1,39 @@
++// The native players can start a phrase while the model synthesizes the next.
++// Keep punctuation with its text and leave long individual tokens intact.
++final _tokens = RegExp(r'[^\s。！？、，；：]+(?:[。！？、，；：]+[」』”’]*)?|[。！？、，；：]+');
++final _closingQuotes = RegExp(r'''["'”’»」』)\]]+$''');
++final _punctuation = RegExp(r'[,;:!?.。！？、，；：]$');
++final _abbreviation = RegExp(
++  r'^(?:[a-z]\.)+$|^(?:dr|mr|mrs|ms|prof|sr|jr|st|ave|rd|blvd|dept|inc|ltd|co|corp|etc|vs|ph\.d)\.$',
++  caseSensitive: false,
++);
++
++List<String> playbackPhrases(String text, String language) {
++  final tag = language.toLowerCase().split(RegExp('[-_]')).first;
++  final compact = tag == 'ja' || tag == 'zh' || tag == 'ko';
++  final chunks = <String>[];
++  int? start;
++  var previousEnd = 0;
++  for (final token in _tokens.allMatches(text)) {
++    final limit = chunks.isEmpty ? (compact ? 28 : 56) : (compact ? 50 : 96);
++    if (start != null &&
++        (token.end - start > limit ||
++            text.substring(previousEnd, token.start).contains('\n'))) {
++      chunks.add(text.substring(start, previousEnd));
++      start = null;
++    }
++    start ??= token.start;
++    previousEnd = token.end;
++    final word = token[0]!.replaceFirst(_closingQuotes, '');
++    final minLength = chunks.isEmpty ? (compact ? 4 : 8) : (compact ? 12 : 28);
++    if (token.end - start >= minLength &&
++        text.length - token.end >= (compact ? 4 : 8) &&
++        _punctuation.hasMatch(word) &&
++        !_abbreviation.hasMatch(word)) {
++      chunks.add(text.substring(start, token.end));
++      start = null;
++    }
++  }
++  if (start != null) chunks.add(text.substring(start, previousEnd));
++  return chunks;
++}
 diff --git a/packages/on_device_tts/lib/src/voice_packs/bundled_catalog.dart b/packages/on_device_tts/lib/src/voice_packs/bundled_catalog.dart
 index 65eb34d..14d25f8 100644
 --- a/packages/on_device_tts/lib/src/voice_packs/bundled_catalog.dart
@@ -2802,6 +3164,155 @@ index 0000000..b3bae0f
 +    timeout: const Timeout(Duration(minutes: 15)),
 +  );
 +}
+diff --git a/packages/on_device_tts/test/neural_tts_engine_test.dart b/packages/on_device_tts/test/neural_tts_engine_test.dart
+index a00c4fa..3251772 100644
+--- a/packages/on_device_tts/test/neural_tts_engine_test.dart
++++ b/packages/on_device_tts/test/neural_tts_engine_test.dart
+@@ -186,25 +186,58 @@ void main() {
+     expect(native.argsOf('speak').single['handle'], 'h9');
+   });
+ 
+-  test('speaks the whole message with the language, voice and speed', () async {
+-    await speakNow(
+-      'Muxfd said: that was the cleanest clutch, GG everyone!',
+-      rate: 0.8,
+-    );
+-    await speakNow(
+-      'Hola a todos',
+-      voice: const TtsVoice(id: 'M1', name: 'Marco', locale: 'es'),
+-    );
+-    final [first, second] = native.argsOf('speak');
+-    expect(first['segments'], [
+-      'Muxfd said: that was the cleanest clutch, GG everyone!',
+-    ]);
+-    expect(first['language'], 'en');
+-    expect(first['voiceId'], 'F1', reason: "the pack's first speaker");
+-    expect(first['speed'], 1.6);
+-    expect((second['language'], second['voiceId']), ('es', 'M1'));
++  test(
++    'streams clauses in one utterance with the requested voice and speed',
++    () async {
++      await speakNow(
++        'Muxfd said: that was the cleanest clutch, GG everyone!',
++        rate: 0.8,
++      );
++      await speakNow(
++        'Hola a todos',
++        voice: const TtsVoice(id: 'M1', name: 'Marco', locale: 'es'),
++      );
++      final [first, second] = native.argsOf('speak');
++      expect(first['segments'], [
++        'Muxfd said:',
++        'that was the cleanest clutch,',
++        'GG everyone!',
++      ]);
++      expect(second['segments'], ['Hola a todos']);
++      expect(first['language'], 'en');
++      expect(first['voiceId'], 'F1', reason: "the pack's first speaker");
++      expect(first['speed'], 1.6);
++      expect((second['language'], second['voiceId']), ('es', 'M1'));
++    },
++  );
++
++  test('streams long unpunctuated messages at word boundaries', () async {
++    final text = List.filled(22, 'hello').join(' ');
++    await speakNow(text);
++    final chunks = native.argsOf('speak').single['segments'] as List;
++    expect(chunks.length, greaterThan(1));
++    expect((chunks.first as String).length, lessThanOrEqualTo(56));
++    expect(chunks.join(' '), text);
+   });
+ 
++  test(
++    'keeps abbreviations together and splits Japanese at punctuation',
++    () async {
++      await speakNow('I met Dr. Smith at 10:30, then we walked home.');
++      await speakNow('こんばんは、みなさん今日はどうでしたか？また明日もよろしくお願いします。', language: 'ja');
++      final [english, japanese] = native.argsOf('speak');
++      expect(english['segments'], [
++        'I met Dr. Smith at 10:30,',
++        'then we walked home.',
++      ]);
++      expect(japanese['segments'], [
++        'こんばんは、',
++        'みなさん今日はどうでしたか？',
++        'また明日もよろしくお願いします。',
++      ]);
++    },
++  );
++
+   test('maps the rate to the native speed', () {
+     expect([0.0, 0.4, 0.5, 1.0, 5.0].map(NeuralTtsEngine.speedForRate), [
+       0.7,
+diff --git a/packages/on_device_tts/test/onnx_tts_test.dart b/packages/on_device_tts/test/onnx_tts_test.dart
+index cd1d14e..cd707b7 100644
+--- a/packages/on_device_tts/test/onnx_tts_test.dart
++++ b/packages/on_device_tts/test/onnx_tts_test.dart
+@@ -171,6 +171,18 @@ void main() {
+     );
+   });
+ 
++  test(
++    'completed events carry the native final-PCM timestamp when available',
++    () {
++      final event = {'utteranceId': 'u', 'type': 'done', 'elapsedMs': 7800};
++      expect(OnnxTtsEvent.fromMap(event)!.lastPcmReady, isNull);
++      expect(
++        OnnxTtsEvent.fromMap({...event, 'lastPcmReadyMs': 3400})!.lastPcmReady,
++        const Duration(milliseconds: 3400),
++      );
++    },
++  );
++
+   test('events come from the event channel', () async {
+     messenger.setMockStreamHandler(
+       const EventChannel(OnnxTtsPlatform.eventChannelName),
+@@ -187,6 +199,45 @@ void main() {
+     expect(events.single.elapsed, const Duration(milliseconds: 900));
+   });
+ 
++  test(
++    'PCM stream yields an ordered phrase on demand and respects cancellation',
++    () async {
++      handler =
++          (call) async =>
++              call.method == 'load'
++                  ? 'speech'
++                  : {
++                    'sampleRate': 44100,
++                    'pcm': Float32List.fromList([0.25]),
++                  };
++      final tts = await OnnxTts.load(modelDir: '/m', platform: platform);
++      final chunks = StreamIterator(
++        tts.synthesizeStream(
++          'Daisy said, that was the cleanest clutch I have seen all week, GG everyone!',
++          language: 'en',
++          voiceId: 'M2',
++          noiseSeed: 9,
++        ),
++      );
++      expect(await chunks.moveNext(), isTrue);
++      expect(chunks.current.pcm, [0.25]);
++      expect(chunks.current.sampleRate, 44100);
++      await pumpEventQueue();
++      expect(calls.where((call) => call.method == 'synthesize'), hasLength(1));
++      expect(await chunks.moveNext(), isTrue);
++      await chunks.cancel();
++      await pumpEventQueue();
++      final args = calls
++          .where((call) => call.method == 'synthesize')
++          .map((call) => call.arguments);
++      expect(args.map((a) => a['text']), [
++        'Daisy said,',
++        'that was the cleanest clutch I have seen all week,',
++      ]);
++      expect(args.map((a) => a['noiseSeed']), [9, 10]);
++    },
++  );
++
+   test('OnnxTts wraps a handle', () async {
+     handler = (call) async => call.method == 'load' ? 'supertonic-3' : null;
+     final tts = await OnnxTts.load(modelDir: '/m', platform: platform);
 diff --git a/pubspec.lock b/pubspec.lock
 index 8ecf368..553736e 100644
 --- a/pubspec.lock
