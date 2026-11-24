@@ -1,0 +1,11 @@
+name: Profile Accelerate matrix layouts
+on: [push, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  layouts:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - run: sysctl -n machdep.cpu.brand_string
+      - run: clang -O3 -framework Accelerate layout.c -o "$RUNNER_TEMP/layout" && "$RUNNER_TEMP/layout"
