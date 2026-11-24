@@ -314,14 +314,20 @@ Tensor _conv1d(Tensor x, Tensor w, Tensor? bias, _Window win, int group) {
       for (var f = 0; f < filters; f++) {
         final first =
             (b * channels + f ~/ (filters ~/ group) * depth) * blocks * 2;
-        final initial = Float32x4.splat(bias?.values[f].toDouble() ?? 0);
+        final offsetBias = Float32x4.splat(bias?.values[f].toDouble() ?? 0);
         for (var block = 0; block < blocks; block++) {
-          var a = initial, z = initial, offset = first + block * 2;
+          var a = Float32x4.zero(),
+              z = Float32x4.zero(),
+              offset = first + block * 2;
           for (var c = 0; c < depth; c++, offset += blocks * 2) {
             final weight = Float32x4.splat(weights[f * depth + c]);
             a += packed[offset] * weight;
             z += packed[offset + 1] * weight;
           }
+          // Apply the output-channel bias after the dot product, as in the
+          // native kernels. Adding it before a cancellation can lose it.
+          a += offsetBias;
+          z += offsetBias;
           final target = (b * filters + f) * width + block * 8;
           final remain = width - block * 8;
           if (remain >= 8) {

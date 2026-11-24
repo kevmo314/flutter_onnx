@@ -139,6 +139,13 @@ Future<void> main(List<String> args) async {
             "${example['name']}: duration differs by $durationError seconds",
           );
         }
+        final expectedSamples =
+            File('$root/${example['pcm']}').lengthSync() ~/ 4;
+        if (samples != expectedSamples) {
+          throw StateError(
+            "${example['name']}: trimmed $samples samples, expected $expectedSamples",
+          );
+        }
         final clip = Duration(
           microseconds: (samples * 1e6 / example['sample_rate']).round(),
         );
@@ -155,8 +162,7 @@ Future<void> main(List<String> args) async {
             'encoder_us': (encoderTime - durationTime).inMicroseconds,
             'denoiser_us': (denoiserTime - encoderTime).inMicroseconds,
             'vocoder_us': (watch.elapsed - denoiserTime).inMicroseconds,
-            'trim_delta_samples':
-                samples - File('$root/${example['pcm']}').lengthSync() ~/ 4,
+            'trim_delta_samples': samples - expectedSamples,
           }),
         );
       }

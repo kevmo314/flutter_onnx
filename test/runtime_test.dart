@@ -56,6 +56,17 @@ void main() {
     expect(scaled['y']!.values, actual.values.map((v) => v * 4).toList());
   });
 
+  test('pointwise convolution adds the bias after filter accumulation', () {
+    final graph = OnnxSession.fromBytes(base64Decode(
+        'CA46dgoSCgF4CgF3CgFiEgF5IgRDb252EgRiaWFzWhcKAXgSEgoQCAESDAoCCAEKAggCCgIIAVoXCgF3EhIKEAgBEgwKAggBCgIIAgoCCAFaDwoBYhIKCggIARIECgIIAWIXCgF5EhIKEAgBEgwKAggBCgIIAQoCCAFCBAoAEBI='));
+    final out = graph.run({
+      'x': Tensor.float32([1, 2, 1], [1, 1]),
+      'w': Tensor.float32([1, 2, 1], [16777216, -16777216]),
+      'b': Tensor.float32([1], [1]),
+    });
+    expect(out['y']!.values, [1]);
+  });
+
   test('tied weights produce the same projection on CPU and device', () async {
     final session = OnnxSession.fromBytes(
         base64Decode(supplementalModels['tied_weights']!));

@@ -73,7 +73,16 @@ From the repository root, run `dart pub get` and `dart test -p vm -p chrome`. Th
 
 The JPEG reconstruction code is based in part on the work of the Independent JPEG Group. The WebP decoder adapts the Dart image package and libwebp. [Independent JPEG Group terms](third_party/ijg/README.ijg) · [Dart image license](third_party/image/LICENSE) · [libwebp license](third_party/libwebp/COPYING)
 
-The optional `cpu/` package supplies a `NativeCpuBackend` for `runAsync`.
-It builds a small C matrix kernel on Android and Linux and uses Accelerate
-on Apple devices. Dense one-dimensional convolutions and matrix products
-can use this backend from a background isolate.
+The optional [native CPU package](cpu/) supplies `NativeCpuBackend` for
+`runAsync`. Reuse the backend and session in an inference isolate so that
+pointwise convolutions can reuse their prepared filters. The backend uses
+Accelerate on Apple devices and SIMD kernels on Android and Linux. It also
+handles depthwise convolution and normalization across channels in NCL layout.
+
+The RTChat mobile speech workflow builds the app with the runtime checkout
+and exercises its native audio player. It measures three fresh synthesis
+rounds with the default five-step Supertonic 3 model. Each round must generate
+its audio in less time than the PCM takes to play. The JSONL artifact records
+synthesis time, audio duration, real-time factor, time to first audio and
+playback completion. The platform inference workflow checks the waveforms
+against the Supertone Python implementation on Linux and macOS.
