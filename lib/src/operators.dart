@@ -164,25 +164,42 @@ Tensor _binary(String op, Tensor a, Tensor b) {
   _require(a.type == b.type, "Arithmetic operand types differ");
   if (a.type == TensorType.float32) {
     final left = a.values as Float32List, right = b.values as Float32List;
-    final size = _size(shape);
-    // Equal shapes and scalar broadcasts are contiguous; no division or
-    // coordinate reconstruction is needed in the inner loop.
-    if ((left.length == size || left.length == 1) &&
-        (right.length == size || right.length == 1)) {
-      final result = Float32List(size);
-      final stepA = left.length == 1 ? 0 : 1, stepB = right.length == 1 ? 0 : 1;
-      for (var i = 0, j = 0, k = 0; i < size; i++, j += stepA, k += stepB) {
-        final x = left[j], y = right[k];
-        result[i] = switch (op) {
-          'Add' => x + y,
-          'Sub' => x - y,
-          'Mul' => x * y,
-          'Div' => x / y,
-          _ => throw StateError(op)
-        };
+    final size = _size(shape), result = Float32List(size);
+    if (size == 0) return Tensor._(a.type, shape, result.asUnmodifiableView());
+    final contiguous = (left.length == size || left.length == 1) &&
+        (right.length == size || right.length == 1);
+    final width = contiguous ? size : shape.last;
+    final ma = contiguous ? null : _IndexMap(a.shape, shape);
+    final mb = contiguous ? null : _IndexMap(b.shape, shape);
+    final stepA = ma?.inStrides.last ?? (left.length == 1 ? 0 : 1);
+    final stepB = mb?.inStrides.last ?? (right.length == 1 ? 0 : 1);
+    // Broadcast the last axis as a contiguous span or a repeated scalar.
+    // Resolve outer coordinates and choose the operation only once per span.
+    for (var base = 0; base < size; base += width) {
+      var j = ma?.at(base) ?? 0, k = mb?.at(base) ?? 0;
+      final end = base + width;
+      switch (op) {
+        case 'Add':
+          for (var i = base; i < end; i++, j += stepA, k += stepB) {
+            result[i] = left[j] + right[k];
+          }
+        case 'Sub':
+          for (var i = base; i < end; i++, j += stepA, k += stepB) {
+            result[i] = left[j] - right[k];
+          }
+        case 'Mul':
+          for (var i = base; i < end; i++, j += stepA, k += stepB) {
+            result[i] = left[j] * right[k];
+          }
+        case 'Div':
+          for (var i = base; i < end; i++, j += stepA, k += stepB) {
+            result[i] = left[j] / right[k];
+          }
+        default:
+          throw StateError(op);
       }
-      return Tensor._(a.type, shape, result.asUnmodifiableView());
     }
+    return Tensor._(a.type, shape, result.asUnmodifiableView());
   }
   final ia = _IndexMap(a.shape, shape), ib = _IndexMap(b.shape, shape);
   return _generate(a.type, shape, (i) {

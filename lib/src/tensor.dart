@@ -392,8 +392,15 @@ Tensor _decodeRaw(TensorType type, List<int> shape, Uint8List bytes) {
                 );
         })));
   }
-  if (type == TensorType.float32)
+  if (type == TensorType.float32) {
+    if (Endian.host == Endian.little) {
+      // Make an owned, aligned copy, including unaligned protobuf slices.
+      final copy = Uint8List.fromList(bytes);
+      return Tensor._(
+          type, shape, Float32List.sublistView(copy).asUnmodifiableView());
+    }
     return _float(shape, (i) => d.getFloat32(i * 4, Endian.little));
+  }
   if (type == TensorType.uint8)
     return Tensor._(
         type, shape, Uint8List.fromList(bytes).asUnmodifiableView());

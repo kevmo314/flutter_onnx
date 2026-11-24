@@ -28,6 +28,27 @@ void main() {
       ]);
     }
   });
+  test('matrix operands broadcast across independent batch axes', () async {
+    final graph = OnnxSession.fromBytes(
+      base64Decode(
+        'CA46cQoRCgFhCgFiEgF5IgZNYXRNdWwSBWJhdGNoWhsKAWESFgoUCAESEAoCCAIKAggBCgIIAQoCCANaGwoBYhIWChQIARIQCgIIAQoCCAMKAggDCgIIAWIbCgF5EhYKFAgBEhAKAggCCgIIAwoCCAEKAggBQgQKABAS',
+      ),
+    );
+    final feeds = {
+      'a': Tensor.float32([2, 1, 1, 3], [1, 2, 3, 4, 5, 6]),
+      'b': Tensor.float32([1, 3, 3, 1], [1, 0, 0, 0, 1, 0, 0, 0, 1]),
+    };
+    final nodes = <String>[];
+    final result = await graph.runAsync(
+      feeds,
+      backend: backend,
+      onAccelerated: nodes.add,
+    );
+    expect(result['y']!.shape, [2, 3, 1, 1]);
+    expect(result['y']!.values, [1, 2, 3, 4, 5, 6]);
+    expect(nodes, hasLength(1));
+  });
+
   test('batched strided dilated convolution agrees with scalar sums', () async {
     final graph = OnnxSession.fromBytes(
       base64Decode(

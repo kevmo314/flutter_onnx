@@ -258,6 +258,41 @@ Future<Tensor?> _tryAccelerate(
   }
   if (node.op != 'MatMul' && node.op != 'Gemm') return null;
   var a = args[0]!, b = args[1]!;
+  if (node.op == 'MatMul' &&
+      a.type == TensorType.float32 &&
+      b.type == a.type &&
+      a.shape.length >= 2 &&
+      b.shape.length > 2 &&
+      a.length != 0 &&
+      b.length != 0) {
+    final rows = a.shape[a.shape.length - 2],
+        inner = a.shape.last,
+        columns = b.shape.last;
+    _require(
+        inner == b.shape[b.shape.length - 2], 'Matrix inner dimensions differ');
+    final aBatch = a.shape.sublist(0, a.shape.length - 2),
+        bBatch = b.shape.sublist(0, b.shape.length - 2);
+    final batch = _broadcastShape(aBatch, bBatch),
+        ma = _IndexMap(aBatch, batch),
+        mb = _IndexMap(bBatch, batch);
+    final shape = [...batch, rows, columns], out = Float32List(_size(shape));
+    final av = a.values as Float32List, bv = b.values as Float32List;
+    final count = _size(batch);
+    for (var g = 0; g < count; g++) {
+      final ap = ma.at(g) * rows * inner, bp = mb.at(g) * inner * columns;
+      final values = await backend.multiply(
+          Float32List.sublistView(av, ap, ap + rows * inner),
+          Float32List.sublistView(bv, bp, bp + inner * columns),
+          rows: rows,
+          inner: inner,
+          columns: columns);
+      if (values == null) return null;
+      if (values.length != rows * columns)
+        throw StateError('${backend.name} returned an incorrect matrix length');
+      out.setRange(g * rows * columns, (g + 1) * rows * columns, values);
+    }
+    return Tensor._(a.type, shape, out.asUnmodifiableView());
+  }
   if (a.type != TensorType.float32 ||
       b.type != TensorType.float32 ||
       a.values.isEmpty ||
