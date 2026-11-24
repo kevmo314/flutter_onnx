@@ -41,8 +41,15 @@ EXPORT void onnx_pointwise_pack(const float *weights, const float *bias,
                                 float *out, int first, int end, int channels,
                                 int filters) {
 #ifdef __APPLE__
-  memcpy(out + (size_t)first * channels, weights + (size_t)first * channels,
-         (size_t)(end - first) * channels * sizeof(float));
+  // Accelerate consumes a transposed K x F weight matrix for short NCL
+  // sequences. Write adjacent filters in blocks to keep stores contiguous.
+  for (int f = first; f < end; f += filters_per_tile) {
+    for (int k = 0; k < channels; ++k) {
+      for (int j = 0; j < filters_per_tile; ++j)
+        out[(size_t)k * filters + f + j] =
+            weights[(size_t)(f + j) * channels + k];
+    }
+  }
   float *offset = out + (size_t)filters * channels + first;
   if (bias)
     memcpy(offset, bias + first, (end - first) * sizeof(float));
@@ -130,17 +137,42 @@ EXPORT int onnx_pointwise_run(const float *x, const float *weights, float *y,
     batch = 1;
 #ifdef __APPLE__
   const float *bias = weights + (size_t)filters * channels;
-  for (int b = 0; b < batch; ++b) {
-    float *out = y + (size_t)b * filters * width;
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, filters, width,
-                channels, 1, weights, channels,
-                x + (size_t)b * channels * width, width, 0, out, width);
-    for (int f = 0; f < filters; ++f)
-      for (int t = 0; t < width; ++t) {
-        float value = out[(size_t)f * width + t] + bias[f];
-        out[(size_t)f * width + t] = gelu ? expanded_gelu(value) : value;
-      }
+  const int columns = (batch * width + 3) & ~3;
+  const int direct = batch == 1 && columns == width;
+  float *joined =
+      direct ? NULL : calloc((size_t)channels * columns, sizeof(float));
+  float *product =
+      direct ? y : malloc((size_t)filters * columns * sizeof(float));
+  if (!direct && (!joined || !product)) {
+    free(joined);
+    free(product);
+    return 0;
   }
+  if (!direct) {
+    for (int b = 0; b < batch; ++b) {
+      for (int c = 0; c < channels; ++c)
+        memcpy(joined + (size_t)c * columns + b * width,
+               x + ((size_t)b * channels + c) * width, width * sizeof(float));
+    }
+  }
+  // All batches share one parameter matrix. Keep the four-frame tail padded
+  // so Accelerate can select a vector kernel even for odd speech lengths.
+  cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans, filters, columns,
+              channels, 1, weights, filters, direct ? x : joined, columns, 0,
+              product, columns);
+  for (int b = 0; b < batch; ++b) {
+    for (int f = 0; f < filters; ++f) {
+      const float *src = product + (size_t)f * columns + b * width;
+      float *dst = y + ((size_t)b * filters + f) * width;
+      for (int t = 0; t < width; ++t) {
+        const float value = src[t] + bias[f];
+        dst[t] = gelu ? expanded_gelu(value) : value;
+      }
+    }
+  }
+  free(joined);
+  if (!direct)
+    free(product);
   (void)threads;
 #elif defined(__linux__) && (defined(__GNUC__) || defined(__clang__))
   const int frames = batch * width;
