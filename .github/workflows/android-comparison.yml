@@ -30,6 +30,7 @@ jobs:
           flutter build apk --profile --target-platform android-x64 -t integration_test/profile_playback.dart
           cp build/app/outputs/flutter-apk/app-profile.apk "$RUNNER_TEMP/original.apk"
           rm integration_test/profile_playback.dart
+          git restore --source=HEAD -- .
           git apply ../migration.patch
           python3 ../trace-graphs.py
           flutter pub get
