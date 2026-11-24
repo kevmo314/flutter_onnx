@@ -79,7 +79,7 @@ pointwise convolutions can reuse their prepared filters. The backend uses
 Accelerate on Apple devices and SIMD kernels on Android and Linux. It also
 handles depthwise convolution and normalization across channels in NCL layout.
 
-On Apple, batched projections that contract the channel dimension can use a prepared Accelerate BNNS fully connected layer. The backend reuses its weights across inference calls.
+On Apple, large pointwise convolutions can use a prepared Accelerate BNNS fully connected layer. The backend reuses its weights across inference calls and adds bias after the matrix product rounds to float32.
 
 The RTChat mobile speech workflow builds the app with the runtime checkout
 and exercises its native audio player. It measures three fresh synthesis

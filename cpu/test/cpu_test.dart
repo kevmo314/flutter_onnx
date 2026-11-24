@@ -140,6 +140,29 @@ void main() {
       }
     },
   );
+  test('pointwise bias follows the rounded product before GELU', () async {
+    const channels = 256, filters = 128, width = 9;
+    final x = Tensor.float32(
+      [1, channels, width],
+      [
+        ...List.filled(width, 16777216),
+        ...List.filled(width, -16777216),
+        ...List.filled((channels - 2) * width, 0),
+      ],
+    );
+    final weights = Tensor.float32([
+      filters,
+      channels,
+      1,
+    ], List.filled(filters * channels, 1));
+    final bias = Tensor.float32([filters], List.filled(filters, 1));
+    final output = await backend.pointwise(x, weights, bias, gelu: false);
+    expect(output, isNotNull);
+    expect(output!, everyElement(1));
+    final activated = await backend.pointwise(x, weights, bias, gelu: true);
+    expect(activated, isNotNull);
+    expect(activated!, everyElement(closeTo(0.84134475, 0.000001)));
+  });
   test(
     'channel normalization preserves visible intermediates and frame tails',
     () async {

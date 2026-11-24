@@ -85,8 +85,14 @@ static float expanded_gelu(float value) {
 #endif
 
 #ifdef __APPLE__
-// BNNS copies both parameters into the filter unless BNNSFlagsUseClientPtr
-// is requested. The caller can release its temporary weights after creation.
+typedef struct {
+  BNNSFilter product;
+  int has_bias;
+  float bias[];
+} dense_filter;
+
+// BNNS owns the weights. Keep bias separate so the convolution's product
+// rounds to float32 before bias is added, including in fused GELU graphs.
 EXPORT void *onnx_fc_create(const float *weights, const float *bias,
                             int channels, int filters, int threads) {
   if (__builtin_available(macOS 11.0, iOS 14.0, *)) {
@@ -102,22 +108,33 @@ EXPORT void *onnx_fc_create(const float *weights, const float *bias,
                    .size = {channels, filters},
                    .data = (void *)weights},
         .activation = {.function = BNNSActivationFunctionIdentity}};
-    if (bias) {
-      layer.bias = (BNNSNDArrayDescriptor){.layout = BNNSDataLayoutVector,
-                                           .data_type = BNNSDataTypeFloat32,
-                                           .size = {filters},
-                                           .data = (void *)bias};
-    }
     BNNSFilterParameters params = {.n_threads = threads};
-    return BNNSFilterCreateLayerFullyConnected(&layer, &params);
+    dense_filter *prepared =
+        calloc(1, sizeof(*prepared) + (size_t)filters * sizeof(float));
+    if (!prepared)
+      return NULL;
+    prepared->product = BNNSFilterCreateLayerFullyConnected(&layer, &params);
+    if (!prepared->product) {
+      free(prepared);
+      return NULL;
+    }
+    prepared->has_bias = bias != NULL;
+    if (bias)
+      memcpy(prepared->bias, bias, (size_t)filters * sizeof(float));
+    return prepared;
   }
   return NULL;
 }
 
-EXPORT void onnx_fc_destroy(void *filter) { BNNSFilterDestroy(filter); }
+EXPORT void onnx_fc_destroy(void *handle) {
+  dense_filter *filter = handle;
+  BNNSFilterDestroy(filter->product);
+  free(filter);
+}
 
 EXPORT int onnx_fc_run(void *filter, const float *x, float *y, int batch,
-                       int channels, int width, int filters) {
+                       int channels, int width, int filters, int gelu) {
+  const dense_filter *prepared = filter;
   size_t nx = (size_t)channels * width, ny = (size_t)filters * width;
   const int repeated = batch == 2 && memcmp(x, x + nx, nx * sizeof(float)) == 0;
   if (repeated)
@@ -132,11 +149,22 @@ EXPORT int onnx_fc_run(void *filter, const float *x, float *y, int batch,
   for (int b = 0; b < batch; ++b)
     vDSP_mtrans(x + b * nx, 1, samples + b * nx, 1, width, channels);
   const int success =
-      BNNSFilterApplyBatch(filter, (size_t)batch * width, samples, channels,
-                           products, filters) == 0;
+      BNNSFilterApplyBatch(prepared->product, (size_t)batch * width, samples,
+                           channels, products, filters) == 0;
   if (success) {
     for (int b = 0; b < batch; ++b)
       vDSP_mtrans(products + b * ny, 1, y + b * ny, 1, filters, width);
+    if (prepared->has_bias) {
+      for (int b = 0; b < batch; ++b) {
+        for (int f = 0; f < filters; ++f) {
+          float *row = y + b * ny + (size_t)f * width;
+          for (int t = 0; t < width; ++t)
+            row[t] += prepared->bias[f];
+        }
+      }
+    }
+    if (gelu)
+      activate_span(y, batch * ny);
     if (repeated)
       memcpy(y + ny, y, ny * sizeof(float));
   }
@@ -151,7 +179,7 @@ EXPORT void *onnx_fc_create(const float *w, const float *b, int c, int f,
 }
 EXPORT void onnx_fc_destroy(void *filter) {}
 EXPORT int onnx_fc_run(void *handle, const float *x, float *y, int b, int c,
-                       int w, int f) {
+                       int w, int f, int g) {
   return 0;
 }
 #endif

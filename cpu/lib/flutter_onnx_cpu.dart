@@ -189,6 +189,7 @@ external void _destroyDenseFilter(Pointer<Void> handle);
     Int32,
     Int32,
     Int32,
+    Int32,
   )
 >(symbol: 'onnx_fc_run')
 external int _runDenseFilter(
@@ -199,6 +200,7 @@ external int _runDenseFilter(
   int channels,
   int width,
   int filters,
+  int gelu,
 );
 
 class _DenseFilter implements Finalizable {
@@ -231,7 +233,7 @@ class _DenseFilter implements Finalizable {
         threads,
       ),
       bias,
-      weights.length * 4,
+      (weights.length + weights.shape.first) * 4,
     );
   }, malloc);
 }
@@ -399,13 +401,11 @@ class NativeCpuBackend implements ChannelwiseBackend {
       math.min(maxThreads, Platform.numberOfProcessors),
     );
     _DenseFilter? dense;
-    // BNNS amortizes its layout conversion for batched contractions. Expanded
-    // and fused-activation projections retain their existing accumulation path.
+    // A prepared BNNS layer reuses its weight layout across inference calls.
+    // Smaller channel dimensions continue to use the packed BLAS path.
     if ((Platform.isIOS || Platform.isMacOS) &&
-        batch > 1 &&
-        !gelu &&
         filters >= 128 &&
-        channels >= filters) {
+        channels >= 128) {
       final cache = _denseFilters[this] ??= Expando<_DenseFilter>();
       dense = cache[weights];
       if (dense == null || !identical(dense.bias, bias)) {
@@ -427,6 +427,7 @@ class NativeCpuBackend implements ChannelwiseBackend {
                 channels,
                 width,
                 filters,
+                gelu ? 1 : 0,
               ) !=
               0) {
         return Float32List.fromList(y.asTypedList(size));
