@@ -103,35 +103,37 @@ void main() {
   test(
     'prepared convolution spans batches, tails and changed biases',
     () async {
-      const channels = 96, filters = 128, width = 13, batch = 2;
-      final w = Tensor.float32([
-        filters,
-        channels,
-        1,
-      ], List.generate(filters * channels, (i) => (i % 7) - 3));
-      for (final shift in [0, 1]) {
-        final x = Tensor.float32(
-          [batch, channels, width],
-          List.generate(
-            batch * channels * width,
-            (i) => ((i + shift) % 11) - 5,
-          ),
-        );
-        final bias = shift == 0
-            ? null
-            : Tensor.float32([filters], List.generate(filters, (i) => i % 5));
-        final out = await backend.pointwise(x, w, bias, gelu: false);
-        expect(out, isNotNull);
-        for (var b = 0; b < batch; b++) {
-          for (var f = 0; f < filters; f++) {
-            for (var t = 0; t < width; t++) {
-              num sum = bias?.values[f] ?? 0;
-              for (var c = 0; c < channels; c++) {
-                sum +=
-                    w.values[f * channels + c] *
-                    x.values[(b * channels + c) * width + t];
+      const filters = 128, width = 13, batch = 2;
+      for (final channels in [96, 256]) {
+        final w = Tensor.float32([
+          filters,
+          channels,
+          1,
+        ], List.generate(filters * channels, (i) => (i % 7) - 3));
+        for (final shift in [0, 1]) {
+          final x = Tensor.float32(
+            [batch, channels, width],
+            List.generate(
+              batch * channels * width,
+              (i) => ((i + shift) % 11) - 5,
+            ),
+          );
+          final bias = shift == 0
+              ? null
+              : Tensor.float32([filters], List.generate(filters, (i) => i % 5));
+          final out = await backend.pointwise(x, w, bias, gelu: false);
+          expect(out, isNotNull);
+          for (var b = 0; b < batch; b++) {
+            for (var f = 0; f < filters; f++) {
+              for (var t = 0; t < width; t++) {
+                num sum = bias?.values[f] ?? 0;
+                for (var c = 0; c < channels; c++) {
+                  sum +=
+                      w.values[f * channels + c] *
+                      x.values[(b * channels + c) * width + t];
+                }
+                expect(out![(b * filters + f) * width + t], sum);
               }
-              expect(out![(b * filters + f) * width + t], sum);
             }
           }
         }

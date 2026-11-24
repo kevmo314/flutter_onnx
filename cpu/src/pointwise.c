@@ -84,6 +84,78 @@ static float expanded_gelu(float value) {
 }
 #endif
 
+#ifdef __APPLE__
+// BNNS copies both parameters into the filter unless BNNSFlagsUseClientPtr
+// is requested. The caller can release its temporary weights after creation.
+EXPORT void *onnx_fc_create(const float *weights, const float *bias,
+                            int channels, int filters, int threads) {
+  if (__builtin_available(macOS 11.0, iOS 14.0, *)) {
+    BNNSLayerParametersFullyConnected layer = {
+        .i_desc = {.layout = BNNSDataLayoutVector,
+                   .data_type = BNNSDataTypeFloat32,
+                   .size = {channels}},
+        .o_desc = {.layout = BNNSDataLayoutVector,
+                   .data_type = BNNSDataTypeFloat32,
+                   .size = {filters}},
+        .w_desc = {.layout = BNNSDataLayoutRowMajorMatrix,
+                   .data_type = BNNSDataTypeFloat32,
+                   .size = {channels, filters},
+                   .data = (void *)weights},
+        .activation = {.function = BNNSActivationFunctionIdentity}};
+    if (bias) {
+      layer.bias = (BNNSNDArrayDescriptor){.layout = BNNSDataLayoutVector,
+                                           .data_type = BNNSDataTypeFloat32,
+                                           .size = {filters},
+                                           .data = (void *)bias};
+    }
+    BNNSFilterParameters params = {.n_threads = threads};
+    return BNNSFilterCreateLayerFullyConnected(&layer, &params);
+  }
+  return NULL;
+}
+
+EXPORT void onnx_fc_destroy(void *filter) { BNNSFilterDestroy(filter); }
+
+EXPORT int onnx_fc_run(void *filter, const float *x, float *y, int batch,
+                       int channels, int width, int filters) {
+  size_t nx = (size_t)channels * width, ny = (size_t)filters * width;
+  const int repeated = batch == 2 && memcmp(x, x + nx, nx * sizeof(float)) == 0;
+  if (repeated)
+    batch = 1;
+  float *samples = malloc((size_t)batch * nx * sizeof(float));
+  float *products = malloc((size_t)batch * ny * sizeof(float));
+  if (!samples || !products) {
+    free(samples);
+    free(products);
+    return 0;
+  }
+  for (int b = 0; b < batch; ++b)
+    vDSP_mtrans(x + b * nx, 1, samples + b * nx, 1, width, channels);
+  const int success =
+      BNNSFilterApplyBatch(filter, (size_t)batch * width, samples, channels,
+                           products, filters) == 0;
+  if (success) {
+    for (int b = 0; b < batch; ++b)
+      vDSP_mtrans(products + b * ny, 1, y + b * ny, 1, filters, width);
+    if (repeated)
+      memcpy(y + ny, y, ny * sizeof(float));
+  }
+  free(samples);
+  free(products);
+  return success;
+}
+#else
+EXPORT void *onnx_fc_create(const float *w, const float *b, int c, int f,
+                            int t) {
+  return NULL;
+}
+EXPORT void onnx_fc_destroy(void *filter) {}
+EXPORT int onnx_fc_run(void *handle, const float *x, float *y, int b, int c,
+                       int w, int f) {
+  return 0;
+}
+#endif
+
 // Prepare a bounded range of complete output-channel panels. Bias occupies
 // the last row of every panel, so both parameter arrays share one lifetime.
 EXPORT void onnx_pointwise_pack(const float *weights, const float *bias,
