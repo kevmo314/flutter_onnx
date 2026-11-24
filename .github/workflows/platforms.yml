@@ -86,20 +86,39 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install onnx==1.23.2 onnxruntime==1.32.0 numpy
-      - name: Run inference on an iPhone simulator
+      - name: Prepare the iPhone simulator
         working-directory: example
         run: |
           simulator=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; print(next(d["udid"] for rt,ds in json.load(sys.stdin)["devices"].items() if ".iOS-" in rt for d in ds if d["name"].startswith("iPhone")))')
           xcrun simctl boot "$simulator"
           xcrun simctl bootstatus "$simulator" -b
+          echo "IOS_SIMULATOR=$simulator" >> "$GITHUB_ENV"
           flutter pub get
           flutter build ios --simulator --debug --dart-define=VERIFY_LARGE_MODELS=true --target integration_test/platform_check.dart
-          bash ../tool/check_mobile.sh ios "$simulator"
-          cd ..
-          python tool/verify_models.py --cache "$RUNNER_TEMP/models" --device "$simulator" qwen_q4 qwen3_q4
-          python tool/opset_conformance.py --device "$simulator" --strict --baseline tool/conformance-baseline.txt --report ios-opset.json
-          cd example
-          flutter test --no-pub integration_test -d "$simulator"
+      - name: Run bundled iOS inference checks
+        working-directory: example
+        run: bash ../tool/check_mobile.sh ios "$IOS_SIMULATOR"
+      - name: Compare Qwen2.5 and Qwen3 on iOS
+        run: python tool/verify_models.py --cache "$RUNNER_TEMP/models" --device "$IOS_SIMULATOR" qwen_q4 qwen3_q4
+      - name: Check all opset 28 operators on iOS
+        run: python tool/opset_conformance.py --device "$IOS_SIMULATOR" --strict --baseline tool/conformance-baseline.txt --report ios-opset.json
+      - name: Run Flutter integration tests with XCTest
+        working-directory: example
+        run: |
+          results="$RUNNER_TEMP/ios-tests"
+          mkdir -p "$results"
+          find integration_test -name '*_test.dart' -type f | sort > "$results/targets"
+          test -s "$results/targets"
+          while IFS= read -r target; do
+            flutter build ios --config-only --simulator --debug --target "$target"
+            bundle="$results/${target%.dart}.xcresult"
+            mkdir -p "$(dirname "$bundle")"
+            xcodebuild -quiet -workspace ios/Runner.xcworkspace -scheme Runner \
+              -configuration Debug -destination "id=$IOS_SIMULATOR" -parallel-testing-enabled NO \
+              -resultBundlePath "$bundle" test
+            xcrun xcresulttool get test-results summary --path "$bundle" | \
+              jq -e '.passedTests > 0 and .failedTests == 0'
+          done < "$results/targets"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
