@@ -54,9 +54,9 @@ static void activate_span(float *values, size_t length) {
 }
 
 typedef struct {
-  const float *weights, *input, *bias;
+  const float *bias;
   float *product, *output;
-  int channels, filters, columns, width, batch, workers, gelu;
+  int filters, columns, width, batch, workers, gelu;
 } apple_product;
 
 static void apple_rows(void *context, size_t index) {
@@ -64,10 +64,6 @@ static void apple_rows(void *context, size_t index) {
   const int tiles = job->filters / filters_per_tile;
   const int first = tiles * index / job->workers * filters_per_tile;
   const int end = tiles * (index + 1) / job->workers * filters_per_tile;
-  cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans, end - first,
-              job->columns, job->channels, 1, job->weights + first,
-              job->filters, job->input, job->columns, 0,
-              job->product + (size_t)first * job->columns, job->columns);
   for (int b = 0; b < job->batch; ++b) {
     float *out = job->output + ((size_t)b * job->filters + first) * job->width;
     for (int f = first; f < end; ++f) {
@@ -210,22 +206,15 @@ EXPORT int onnx_pointwise_run(const float *x, const float *weights, float *y,
   }
   // All batches share one parameter matrix. Keep the four-frame tail padded
   // so Accelerate can select a vector kernel even for odd speech lengths.
-  // Splitting a small SGEMM alone adds overhead. With GELU, independent
-  // output ranges also parallelize the activation and NCL output copies.
+  // Keep the full filter dimension for BLAS. Splitting a reduction into
+  // separately scheduled BLAS calls can change the chosen accumulation kernel.
+  cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans, filters, columns,
+              channels, 1, weights, filters, direct ? x : joined, columns, 0,
+              product, columns);
   const int parallel = gelu && threads > 1 && filters >= 32 &&
-                       (int64_t)filters * channels * columns >= 8000000;
-  apple_product job = {weights,
-                       direct ? x : joined,
-                       bias,
-                       product,
-                       y,
-                       channels,
-                       filters,
-                       columns,
-                       width,
-                       batch,
-                       parallel ? 2 : 1,
-                       gelu};
+                       (int64_t)filters * columns >= 32768;
+  apple_product job = {bias,  product,          y,   filters, columns, width,
+                       batch, parallel ? 2 : 1, gelu};
   if (parallel)
     dispatch_apply_f(job.workers,
                      dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),

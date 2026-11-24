@@ -2,6 +2,9 @@ name: RTChat mobile speech
 on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
+concurrency:
+  group: rtchat-speech-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
 jobs:
   synthesis:
     strategy:
@@ -35,7 +38,7 @@ jobs:
       - name: Prepare the migrated app with the runtime under test
         working-directory: rtchat
         run: |
-          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/da819122905353b68d32d7802d003afaf8aaa419/migration.patch -o "$RUNNER_TEMP/rtchat.patch"
+          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/bf094db45a770605a027452c2bf67b14416abff1/migration.patch -o "$RUNNER_TEMP/rtchat.patch"
           git apply "$RUNNER_TEMP/rtchat.patch"
           cat > pubspec_overrides.yaml <<'EOF'
           dependency_overrides:

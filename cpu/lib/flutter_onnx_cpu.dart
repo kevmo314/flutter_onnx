@@ -210,8 +210,9 @@ class _PackedFilters implements Finalizable {
 
 /// Dense CPU products for inference isolates. Apple devices use Accelerate.
 class NativeCpuBackend implements ChannelwiseBackend {
-  /// Upper bound on native workers for large Android and Linux products.
-  /// Apple Accelerate schedules its own workers.
+  /// Upper bound on explicit native workers for large products. Apple can
+  /// process activation and bias in two independent output ranges.
+  /// Accelerate manages any threads internal to its matrix operations.
   final int maxThreads;
   const NativeCpuBackend({this.maxThreads = 2}) : assert(maxThreads > 0);
   @override
