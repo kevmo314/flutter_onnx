@@ -1,0 +1,62 @@
+name: Check independent batched contractions and parallel expansion
+on:
+  push:
+    paths: ['.github/workflows/split-contraction.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-cpu:
+    strategy:
+      matrix:
+        os: [macos-15]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: cpu
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: c7147f358cf504e2d16316d69e5badc0f86ea4a2
+      - uses: actions/checkout@v4
+        with:
+          path: diagnostic
+      - run: git apply ../diagnostic/split-rows.patch
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: dart pub get
+      - run: dart analyze lib hook test
+      - run: dart test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compare native CPU speech inference with Supertone
+        env:
+          HF_HUB_DISABLE_XET: '1'
+          RTCHAT_REFERENCE_REV: 6bac5c59d7b593030a7c98ff9b37ae712fdb35ed
+        run: |
+          python -m pip install supertonic==1.3.1
+          curl --retry 3 -fsSL "https://raw.githubusercontent.com/muxable/rtchat/$RTCHAT_REFERENCE_REV/packages/on_device_tts/tool/supertonic_reference.py" -o "$RUNNER_TEMP/reference.py"
+          dart build cli -t test/supertonic_reference.dart -o "$RUNNER_TEMP/speech-cli"
+          for pack in 2:75e6727618a02f323c720cba9478152d4bc16ca4 3:3cadd1ee6394adea1bd021217a0e650ede09a323; do
+            version=${pack%:*}
+            model=$(python -c 'from huggingface_hub import snapshot_download; import sys; print(snapshot_download("Supertone/supertonic-" + sys.argv[1], revision=sys.argv[2], allow_patterns=["onnx/*", "voice_styles/*"]))' "$version" "${pack#*:}")
+            python -I "$RUNNER_TEMP/reference.py" "$model" "$RUNNER_TEMP/reference-$version"
+            "$RUNNER_TEMP/speech-cli/bundle/bin/supertonic_reference" "$RUNNER_TEMP/reference-$version"
+          done
+          python -I test/playback_reference.py "$RUNNER_TEMP/reference.py" "$model" "$RUNNER_TEMP/playback"
+          "$RUNNER_TEMP/speech-cli/bundle/bin/supertonic_reference" --playback "$RUNNER_TEMP/playback" > "$RUNNER_TEMP/playback.log"
+          cat "$RUNNER_TEMP/playback.log"
+          python - "$RUNNER_TEMP/playback.log" <<'PYTHON'
+          import json, sys
+          with open(sys.argv[1]) as report:
+              rows = [json.loads(line) for line in report if line.startswith("{")]
+          warm = [r for r in rows if "rtf" in r and r["round"] > 1]
+          if len(warm) != 2 or any(not 0 < r["rtf"] < 1 for r in warm):
+              raise SystemExit(f"Warm synthesis exceeded the real-time budget: {warm}")
+          PYTHON
+      - uses: actions/upload-artifact@v4
+        with:
+          name: playback-profile-${{ matrix.os }}
+          path: ${{ runner.temp }}/playback.log
