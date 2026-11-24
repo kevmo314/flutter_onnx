@@ -2314,7 +2314,7 @@ index 65eb34d..14d25f8 100644
  // alternative. Models requiring phonemes need a separate engine integration.
  //
 diff --git a/packages/on_device_tts/pubspec.yaml b/packages/on_device_tts/pubspec.yaml
-index f6b7f11..50dab2b 100644
+index f6b7f11..ce6bcee 100644
 --- a/packages/on_device_tts/pubspec.yaml
 +++ b/packages/on_device_tts/pubspec.yaml
 @@ -1,15 +1,24 @@
@@ -2335,12 +2335,12 @@ index f6b7f11..50dab2b 100644
 +  flutter_onnx:
 +    git:
 +      url: https://github.com/kevmo314/flutter_onnx.git
-+      ref: d685353c1b657a586106d6844abe2e5c281a7155
++      ref: 5ba434a1a8a750533e12130edf7519786a546bfb
 +  flutter_onnx_cpu:
 +    git:
 +      url: https://github.com/kevmo314/flutter_onnx.git
 +      path: cpu
-+      ref: d685353c1b657a586106d6844abe2e5c281a7155
++      ref: 5ba434a1a8a750533e12130edf7519786a546bfb
    background_downloader: ^9.6.4
    crypto: ^3.0.7
    flutter:
@@ -2551,7 +2551,7 @@ index 0000000..b3bae0f
 +  );
 +}
 diff --git a/pubspec.lock b/pubspec.lock
-index 8ecf368..d7b814d 100644
+index 8ecf368..a393bf1 100644
 --- a/pubspec.lock
 +++ b/pubspec.lock
 @@ -9,6 +9,14 @@ packages:
@@ -2590,8 +2590,8 @@ index 8ecf368..d7b814d 100644
 +    dependency: transitive
 +    description:
 +      path: "."
-+      ref: d685353c1b657a586106d6844abe2e5c281a7155
-+      resolved-ref: d685353c1b657a586106d6844abe2e5c281a7155
++      ref: "5ba434a1a8a750533e12130edf7519786a546bfb"
++      resolved-ref: "5ba434a1a8a750533e12130edf7519786a546bfb"
 +      url: "https://github.com/kevmo314/flutter_onnx.git"
 +    source: git
 +    version: "0.1.0"
@@ -2599,8 +2599,8 @@ index 8ecf368..d7b814d 100644
 +    dependency: transitive
 +    description:
 +      path: cpu
-+      ref: d685353c1b657a586106d6844abe2e5c281a7155
-+      resolved-ref: d685353c1b657a586106d6844abe2e5c281a7155
++      ref: "5ba434a1a8a750533e12130edf7519786a546bfb"
++      resolved-ref: "5ba434a1a8a750533e12130edf7519786a546bfb"
 +      url: "https://github.com/kevmo314/flutter_onnx.git"
 +    source: git
 +    version: "0.1.0"
