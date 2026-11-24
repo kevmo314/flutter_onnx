@@ -5,11 +5,27 @@ List<Tensor>? _additionalOps(_Node n, List<Tensor?> args) {
   if (x == null) return null;
   final shape = x.shape;
   switch (n.op) {
+    case 'Resize':
+    case 'Upsample':
+      return [_resize(n, args)];
+    case 'GridSample':
+      return [_gridSample(n, x, args[1]!)];
+    case 'AffineGrid':
+      return [_affineGrid(n, x, args[1]!)];
+    case 'RoiAlign':
+    case 'MaxRoiPool':
+      return [_roi(n, args)];
+    case 'Einsum':
+      return [_einsum(n, args.cast<Tensor>())];
+    case 'DFT':
+    case 'STFT':
+    case 'MelWeightMatrix':
+      return [_spectral(n, args)];
     case 'CastLike':
-      return [Tensor.fromValues(args[1]!.type, shape, x.values)];
+      return [_cast(x, args[1]!.type, n)];
     case 'BitCast':
       final type = _type(n.integer('to', 0));
-      _require(type.bytesPerElement == x.type.bytesPerElement,
+      _require(type.bitWidth == x.type.bitWidth,
           'BitCast requires equal element widths');
       return [Tensor.fromBytes(type, shape, x.toBytes())];
     case 'BitwiseNot':
@@ -32,6 +48,10 @@ List<Tensor>? _additionalOps(_Node n, List<Tensor?> args) {
             return r != 0 && r.isNegative != v.isNegative ? r + v : r;
           }
           final lhs = BigInt.from(a.toInt()), rhs = BigInt.from(v.toInt());
+          final bits = x.type.bitWidth;
+          if (n.op == 'BitShift' &&
+              (rhs.isNegative || rhs >= BigInt.from(bits)))
+            return n.attrs['direction'] == 'RIGHT' && lhs.isNegative ? -1 : 0;
           final z = switch (n.op) {
             'BitwiseAnd' => lhs & rhs,
             'BitwiseOr' => lhs | rhs,
@@ -40,7 +60,9 @@ List<Tensor>? _additionalOps(_Node n, List<Tensor?> args) {
                 ? lhs << rhs.toInt()
                 : lhs >> rhs.toInt()
           };
-          return _portableInt(z.toUnsigned(x.type.bytesPerElement * 8));
+          return _portableInt(x.type.name.startsWith('int')
+              ? z.toSigned(bits)
+              : z.toUnsigned(bits));
         })
       ];
     case 'IsInf':
@@ -205,7 +227,11 @@ List<Tensor>? _additionalOps(_Node n, List<Tensor?> args) {
             'Input dimensions do not divide block size');
         final r = x._reshape([b, c, h ~/ block, block, w ~/ block, block]);
         return [
-          _transpose(r, [0, 3, 5, 1, 2, 4])
+          _transpose(
+                  r,
+                  n.attrs['mode'] == 'CRD'
+                      ? [0, 1, 3, 5, 2, 4]
+                      : [0, 3, 5, 1, 2, 4])
               ._reshape([b, c * bb, h ~/ block, w ~/ block])
         ];
       }
@@ -307,7 +333,7 @@ List<Tensor>? _additionalOps(_Node n, List<Tensor?> args) {
           var sum = 0.0;
           for (var j = 0; j < w; j++)
             sum += math.pow(x.values[start + j * inner].abs(), p);
-          return x.values[i] / math.pow(sum, 1 / p);
+          return sum == 0 ? 0 : x.values[i] / math.pow(sum, 1 / p);
         })
       ];
     case 'GroupNormalization':
@@ -486,6 +512,10 @@ int _roundEven(double x) {
 }
 
 (int, int) _limits(TensorType t) => switch (t) {
+      TensorType.uint4 => (0, 15),
+      TensorType.int4 => (-8, 7),
+      TensorType.uint2 => (0, 3),
+      TensorType.int2 => (-2, 1),
       TensorType.uint8 => (0, 255),
       TensorType.int8 => (-128, 127),
       TensorType.uint16 => (0, 65535),
@@ -497,13 +527,18 @@ int _roundEven(double x) {
 List<Tensor> _quantize(_Node n, List<Tensor?> args) {
   final x = args[0]!;
   if (n.op == 'DynamicQuantizeLinear') {
-    final lo = math.min(0, x.values.reduce(math.min)).toDouble(),
-        hi = math.max(0, x.values.reduce(math.max)).toDouble();
-    final scale = hi == lo ? 1.0 : (hi - lo) / 255;
+    final lo = math.min(0, x.values.fold<num>(0, math.min)).toDouble(),
+        hi = math.max(0, x.values.fold<num>(0, math.max)).toDouble();
+    final scale = Float32List.fromList([(hi == lo ? 1 : hi - lo) / 255]).single;
     final zp = _roundEven(-lo / scale).clamp(0, 255);
     return [
-      _generate(TensorType.uint8, x.shape,
-          (i) => (_roundEven(x.values[i] / scale) + zp).clamp(0, 255)),
+      _generate(
+          TensorType.uint8,
+          x.shape,
+          (i) =>
+              (_roundEven(Float32List.fromList([x.values[i] / scale]).single) +
+                      zp)
+                  .clamp(0, 255)),
       Tensor.float32([], [scale]),
       Tensor.fromValues(TensorType.uint8, [], [zp])
     ];
@@ -522,7 +557,7 @@ List<Tensor> _quantize(_Node n, List<Tensor?> args) {
   final stride = _size(x.shape.skip(axis + 1)),
       block = n.integer('block_size', 0);
   final sstr = _strides(s.shape), xstr = _strides(x.shape);
-  final limits = dq ? (0, 0) : _limits(type);
+  final limits = dq || type.floating ? (0, 0) : _limits(type);
   return [
     _generate(type, x.shape, (i) {
       var group = 0;
@@ -535,6 +570,13 @@ List<Tensor> _quantize(_Node n, List<Tensor?> args) {
         group = i ~/ stride % x.shape[axis];
       }
       final scale = s.values[group], zero = z?.values[group] ?? 0;
+      if (!dq && type.floating) {
+        final v = x.values[i] / scale;
+        return type.compact
+            ? _compactValue(type,
+                _compactCode(type, v, saturate: n.integer('saturate', 1) != 0))
+            : v;
+      }
       return dq
           ? (x.values[i] - zero) * scale
           : (_roundEven(x.values[i] / scale) + zero)

@@ -104,8 +104,16 @@ Tensor _tensor(_Proto p, {bool sliceBound = false}) {
   }
   final shape = p.ints(1).toList();
   final type = _type(p.integer(2));
+  if (type == TensorType.string) return Tensor.strings(shape, p.strings(6));
   if (p.has(9))
     return _decodeRaw(type, shape, p.bytes(9), sliceBound: sliceBound);
+  if (type.compact) {
+    final codes = p.ints(5).toList();
+    if (type.bitWidth == 2 || type.bitWidth == 4)
+      return _decodeRaw(type, shape, Uint8List.fromList(codes));
+    return Tensor._(type, shape,
+        List<num>.unmodifiable(codes.map((v) => _compactValue(type, v))));
+  }
   if (type == TensorType.int64 ||
       type == TensorType.uint64 ||
       type == TensorType.uint32) {

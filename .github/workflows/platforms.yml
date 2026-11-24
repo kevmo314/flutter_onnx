@@ -43,6 +43,8 @@ jobs:
           cache: true
       - run: flutter pub get
         working-directory: example
+      - run: flutter build apk --debug --target integration_test/platform_check.dart
+        working-directory: example
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -53,7 +55,7 @@ jobs:
           api-level: 35
           arch: x86_64
           working-directory: example
-          script: flutter test integration_test/inference_test.dart -d emulator-5554
+          script: bash ../tool/check_mobile.sh android
   ios:
     runs-on: macos-15
     timeout-minutes: 40
@@ -70,4 +72,5 @@ jobs:
           xcrun simctl boot "$simulator"
           xcrun simctl bootstatus "$simulator" -b
           flutter pub get
-          flutter test integration_test/inference_test.dart -d "$simulator"
+          flutter build ios --simulator --debug --target integration_test/platform_check.dart
+          bash ../tool/check_mobile.sh ios "$simulator"

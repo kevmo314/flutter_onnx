@@ -5,6 +5,69 @@ List<Tensor> _executeNode(_Node n, List<Tensor?> args) {
   if (extra != null) return extra;
   final x = args.firstOrNull;
   switch (n.op) {
+    case 'RandomUniform':
+    case 'RandomUniformLike':
+    case 'RandomNormal':
+    case 'RandomNormalLike':
+    case 'Multinomial':
+    case 'Bernoulli':
+      return [_random(n, args)];
+    case 'TfIdfVectorizer':
+      return [_vectorizer(n, x!)];
+    case 'ImageDecoder':
+      return [_decodeImage(n, x!)];
+    case 'Col2Im':
+    case 'ConvTranspose':
+      return [_scatterWindows(n, args)];
+    case 'AveragePool':
+    case 'MaxPool':
+    case 'LpPool':
+      return _pool(n, x!);
+    case 'MaxUnpool':
+      return [_unpool(n, args)];
+    case 'ConvInteger':
+    case 'QLinearConv':
+    case 'DeformConv':
+      return [_convolve(n, args)];
+    case 'Conv':
+      if (x!.shape.length != 4) return [_convolve(n, args)];
+      return [_execute(n, args)];
+    case 'BatchNormalization':
+      if (n.integer('training_mode', 0) != 0)
+        return _trainBatchNorm(n, args.cast<Tensor>());
+      return [_execute(n, args)];
+    case 'CausalConvWithState':
+      return _causalConv(n, args);
+    case 'LinearAttention':
+      return _linearAttention(n, args);
+    case 'RNN':
+    case 'GRU':
+    case 'LSTM':
+      return _recurrent(n, args);
+    case 'SoftmaxCrossEntropyLoss':
+    case 'NegativeLogLikelihoodLoss':
+      return _loss(n, args);
+    case 'Mish':
+      return [
+        _generate(x!.type, x.shape, (i) {
+          final v = x.values[i].toDouble();
+          return v * _tanh(math.max(0, v) + math.log(1 + math.exp(-v.abs())));
+        })
+      ];
+    case 'TensorScatter':
+      return [_updateCache(n, args)];
+    case 'NonMaxSuppression':
+      return [_nms(n, args)];
+    case 'Unique':
+      return _unique(n, x!);
+    case 'StringConcat':
+    case 'StringNormalizer':
+    case 'RegexFullMatch':
+    case 'StringSplit':
+      return _stringOp(n, args);
+    case 'Equal':
+      if (x!.type == TensorType.string) return _stringOp(n, args);
+      return [_execute(n, args)];
     case 'com.microsoft::MatMulNBits':
       return [_matMulNBits(n, args)];
     case 'Attention':
@@ -39,8 +102,17 @@ List<Tensor> _executeNode(_Node n, List<Tensor?> args) {
     case 'TopK':
       return _select(n, args);
     case 'Dropout':
-      if (args.elementAtOrNull(2)?.values.single == 1)
-        throw UnsupportedError('Dropout training mode');
+      if (args.elementAtOrNull(2)?.values.single == 1) {
+        final ratio = args.elementAtOrNull(1)?.values.single ?? 0.5;
+        _require(ratio >= 0 && ratio < 1, 'Invalid dropout ratio');
+        final mask = _generate(TensorType.boolean, x!.shape,
+            (_) => n.random.nextDouble() >= ratio ? 1 : 0);
+        return [
+          _generate(x.type, x.shape,
+              (i) => mask.values[i] == 0 ? 0 : x.values[i] / (1 - ratio)),
+          mask
+        ];
+      }
       return [
         x!,
         if (n.outputs.length > 1)
@@ -249,6 +321,21 @@ List<Tensor> _attention(_Node n, List<Tensor?> args) {
       mode = n.integer('qk_matmul_output_mode', 0);
   final cap = n.real('softcap', 0),
       scale = n.real('scale', 1 / math.sqrt(depth));
+  final scratch = ByteData(4);
+  double rounded(double v, TensorType t) {
+    if (t == TensorType.bfloat16 || t == TensorType.float16)
+      return _decodeHalf(_encodeHalf(v, t, scratch), t, scratch);
+    if (t == TensorType.float32) {
+      scratch.setFloat32(0, v);
+      return scratch.getFloat32(0);
+    }
+    return v;
+  }
+
+  final rootScale = rounded(math.sqrt(scale), q.type),
+      precision = n.attrs.containsKey('softmax_precision')
+          ? _type(n.integer('softmax_precision', 1))
+          : q.type;
   final state = Float64List(ks), output = Float64List(batch * hq * qs * dv);
   final extra = n.outputs.length > 3 && n.outputs[3].isNotEmpty
       ? Float64List(_size(shape))
@@ -263,12 +350,11 @@ List<Tensor> _attention(_Node n, List<Tensor?> args) {
         var peak = double.negativeInfinity;
         for (var j = 0; j < ks; j++) {
           var dot = 0.0;
-          for (var d = 0; d < depth; d++) {
-            dot +=
-                q.values[row * depth + d] * k.values[(kvBase + j) * depth + d];
-          }
-          final raw = dot * scale,
-              capped = cap > 0 ? cap * _tanh(raw / cap) : raw;
+          for (var d = 0; d < depth; d++)
+            dot += rounded(q.values[row * depth + d] * rootScale, q.type) *
+                rounded(k.values[(kvBase + j) * depth + d] * rootScale, q.type);
+          final raw = rounded(dot, q.type),
+              capped = cap > 0 ? rounded(cap * _tanh(raw / cap), q.type) : raw;
           final aligned = s + offset;
           final allowed = j < valid &&
               (!causal || j <= aligned) &&
@@ -284,8 +370,8 @@ List<Tensor> _attention(_Node n, List<Tensor?> args) {
           final score = allowed && j < maskWidth
               ? capped + bias
               : double.negativeInfinity;
-          state[j] = score;
-          peak = math.max(peak, score);
+          state[j] = rounded(score, precision);
+          peak = math.max(peak, state[j]);
           if (extra != null)
             extra[row * ks + j] = mode == 0
                 ? raw
@@ -295,12 +381,17 @@ List<Tensor> _attention(_Node n, List<Tensor?> args) {
         }
         var sum = 0.0;
         for (var j = 0; j < ks; j++) {
-          state[j] =
-              peak == double.negativeInfinity ? 0 : math.exp(state[j] - peak);
+          state[j] = peak == double.negativeInfinity
+              ? 0
+              : rounded(
+                  math.exp(rounded(state[j] - peak, precision)), precision);
           sum += state[j];
         }
         for (var j = 0; j < ks; j++) {
-          final prob = sum == 0 ? 0.0 : state[j] / sum;
+          final prob = sum == 0
+              ? 0.0
+              : rounded(rounded(state[j] / rounded(sum, precision), precision),
+                  q.type);
           if (extra != null && mode == 3) extra[row * ks + j] = prob;
           for (var d = 0; d < dv; d++) {
             output[row * dv + d] += prob * v.values[(kvBase + j) * dv + d];

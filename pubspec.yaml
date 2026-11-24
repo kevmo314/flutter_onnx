@@ -10,3 +10,5 @@ platforms:
   web:
 dev_dependencies:
   test: ^1.25.0
+dependencies:
+  image: ^4.13.1

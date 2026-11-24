@@ -6,10 +6,22 @@ class TensorInfo {
   final String name;
   final TensorType type;
   final List<Object?>? dimensions;
-  TensorInfo._(this.name, this.type, this.dimensions);
+  final String kind;
+  final TensorInfo? element;
+  TensorInfo._(this.name, this.type, this.dimensions,
+      [this.kind = "tensor", this.element]);
 
   factory TensorInfo._read(_Proto value) {
-    final tensor = value.message(2);
+    return TensorInfo._type(value.string(1), value.message(2));
+  }
+  factory TensorInfo._type(String name, _Proto tensor) {
+    if (tensor.has(4) || tensor.has(9)) {
+      final sequence = tensor.has(4);
+      final inner =
+          TensorInfo._type(name, tensor.message(sequence ? 4 : 9).message(1));
+      return TensorInfo._(
+          name, inner.type, null, sequence ? 'sequence' : 'optional', inner);
+    }
     if (!tensor.has(1)) throw UnsupportedError('Expected dense tensor type');
     final t = tensor.message(1);
     final dims = t.has(2)
@@ -20,10 +32,25 @@ class TensorInfo {
                     ? d.string(2)
                     : null))
         : null;
-    return TensorInfo._(value.string(1), _type(t.integer(1)), dims);
+    return TensorInfo._(name, _type(t.integer(1)), dims);
   }
 
-  void _check(Tensor t, Map<String, int> symbols) {
+  void _check(OnnxValue value, Map<String, int> symbols) {
+    if (kind == 'optional') {
+      final present = value is OnnxOptional ? value.value : value;
+      if (present != null) element!._check(present, symbols);
+      return;
+    }
+    if (kind == 'sequence') {
+      if (value is! OnnxSequence)
+        throw ArgumentError('$name expects a sequence');
+      for (final item in value.elements) {
+        element!._check(item, symbols);
+      }
+      return;
+    }
+    if (value is! Tensor) throw ArgumentError('$name expects a tensor');
+    final t = value;
     _require(type == t.type, '$name expects $type, got ${t.type}');
     final dims = dimensions;
     if (dims == null) return;
@@ -47,8 +74,9 @@ class OnnxSession {
   final Map<String, Tensor> _weights;
   final List<_Node> _nodes;
   final Map<String, int> _uses;
+  final Set<String> _captures;
   OnnxSession._(this.opset, this.inputs, this.outputs, this._weights,
-      this._nodes, this._uses);
+      this._nodes, this._uses, this._captures);
 
   factory OnnxSession.fromBytes(Uint8List bytes) {
     try {
@@ -64,69 +92,86 @@ class OnnxSession {
       if (version < 13 || version > 28)
         throw UnsupportedError('ONNX opset $version (supported: 13–28)');
       if (model.has(25)) throw UnsupportedError('Model-local functions');
-      final graph = model.message(7);
-      if (graph.has(15)) throw UnsupportedError('Sparse initializers');
-      Map<String, TensorInfo> interface(int field) {
-        final result = <String, TensorInfo>{};
-        for (final value in graph.messages(field)) {
-          final info = TensorInfo._read(value);
-          if (info.name.isEmpty || result.containsKey(info.name))
-            throw FormatException('Invalid graph value "${info.name}"');
-          result[info.name] = info;
-        }
-        return Map.unmodifiable(result);
-      }
-
-      final inputs = interface(11);
-      final outputs = interface(12);
-      final nodes =
-          graph.messages(1).map((p) => _Node.read(p, version)).toList();
-      final sliceBounds = <String>{};
-      final otherUses = {...inputs.keys, ...outputs.keys};
-      for (final n in nodes) {
-        for (final (i, name) in n.inputs.indexed) {
-          if (n.op == 'Slice' && (i == 1 || i == 2)) {
-            sliceBounds.add(name);
-          } else {
-            otherUses.add(name);
-          }
-        }
-      }
-      sliceBounds.removeAll(otherUses);
-      final weights = <String, Tensor>{};
-      for (final t in graph.messages(5)) {
-        final name = t.string(8);
-        if (name.isEmpty || weights.containsKey(name))
-          throw FormatException('Invalid initializer name "$name"');
-        weights[name] = _tensor(t, sliceBound: sliceBounds.contains(name));
-      }
-      final known = {...inputs.keys, ...weights.keys};
-      final uses = <String, int>{};
-      for (final node in nodes) {
-        for (final name in node.inputs.where((n) => n.isNotEmpty)) {
-          if (!known.contains(name))
-            throw FormatException('${node.label}: unknown input $name');
-          uses.update(name, (v) => v + 1, ifAbsent: () => 1);
-        }
-        for (final name in node.outputs.where((v) => v.isNotEmpty)) {
-          if (!known.add(name))
-            throw FormatException('Duplicate graph value $name');
-        }
-      }
-      for (final name in outputs.keys) {
-        if (!known.contains(name))
-          throw FormatException('Unknown graph output $name');
-      }
-      return OnnxSession._(version, inputs, outputs, weights, nodes, uses);
+      return OnnxSession._readGraph(model.message(7), version);
     } on TypeError catch (e) {
       throw FormatException('Invalid ONNX protobuf field: $e');
     }
   }
+  factory OnnxSession._readGraph(_Proto graph, int version,
+      {bool allowCapture = false}) {
+    final captures = <String>{};
+    if (graph.has(15)) throw UnsupportedError('Sparse initializers');
+    Map<String, TensorInfo> interface(int field) {
+      final result = <String, TensorInfo>{};
+      for (final value in graph.messages(field)) {
+        final info = TensorInfo._read(value);
+        if (info.name.isEmpty || result.containsKey(info.name))
+          throw FormatException('Invalid graph value "${info.name}"');
+        result[info.name] = info;
+      }
+      return Map.unmodifiable(result);
+    }
 
-  Map<String, Tensor> run(Map<String, Tensor> feeds) {
-    final frame = _Frame(this, feeds);
-    for (final node in _nodes) {
-      frame.store(node, _executeNode(node, frame.args(node)));
+    final inputs = interface(11);
+    final outputs = interface(12);
+    final nodes = graph.messages(1).map((p) => _Node.read(p, version)).toList();
+    final sliceBounds = <String>{};
+    final otherUses = {...inputs.keys, ...outputs.keys};
+    for (final n in nodes) {
+      for (final (i, name) in n.inputs.indexed) {
+        if (n.op == 'Slice' && (i == 1 || i == 2)) {
+          sliceBounds.add(name);
+        } else {
+          otherUses.add(name);
+        }
+      }
+    }
+    sliceBounds.removeAll(otherUses);
+    final weights = <String, Tensor>{};
+    for (final t in graph.messages(5)) {
+      final name = t.string(8);
+      if (name.isEmpty || weights.containsKey(name))
+        throw FormatException('Invalid initializer name "$name"');
+      weights[name] = _tensor(t, sliceBound: sliceBounds.contains(name));
+    }
+    final known = {...inputs.keys, ...weights.keys};
+    final uses = <String, int>{};
+    for (final node in nodes) {
+      for (final name in node.references) {
+        if (!known.contains(name)) {
+          if (!allowCapture)
+            throw FormatException('${node.label}: unknown input $name');
+          captures.add(name);
+          known.add(name);
+        }
+        uses.update(name, (v) => v + 1, ifAbsent: () => 1);
+      }
+      for (final name in node.outputs.where((v) => v.isNotEmpty)) {
+        if (!known.add(name))
+          throw FormatException('Duplicate graph value $name');
+      }
+    }
+    for (final name in outputs.keys) {
+      if (!known.contains(name)) {
+        if (!allowCapture) throw FormatException('Unknown graph output $name');
+        captures.add(name);
+      }
+    }
+    return OnnxSession._(
+        version, inputs, outputs, weights, nodes, uses, captures);
+  }
+
+  Map<String, Tensor> run(Map<String, Tensor> feeds) =>
+      runValues(feeds).cast<String, Tensor>();
+
+  /// Execute a graph containing tensor, sequence or optional values.
+  Map<String, OnnxValue> runValues(Map<String, OnnxValue> feeds) =>
+      _evaluate(feeds, {});
+  Map<String, OnnxValue> _evaluate(
+      Map<String, OnnxValue> feeds, Map<String, OnnxValue> outer) {
+    final frame = _Frame(this, feeds, outer);
+    for (final n in _nodes) {
+      frame.store(n, _valueNode(n, frame.args(n), frame.values));
     }
     return frame.results();
   }
@@ -137,14 +182,17 @@ class OnnxSession {
       {MatMulBackend? backend,
       void Function(String node)? onAccelerated}) async {
     if (backend == null) return run(feeds);
-    final frame = _Frame(this, feeds);
+    final frame = _Frame(this, feeds, {});
     for (final node in _nodes) {
       final args = frame.args(node);
-      final product = await _tryAccelerate(node, args, backend);
+      final product = (node.op == 'MatMul' || node.op == 'Gemm')
+          ? await _tryAccelerate(node, args.cast<Tensor?>(), backend)
+          : null;
       if (product != null) onAccelerated?.call(node.label);
-      frame.store(node, product == null ? _executeNode(node, args) : [product]);
+      frame.store(node,
+          product == null ? _valueNode(node, args, frame.values) : [product]);
     }
-    return frame.results();
+    return frame.results().cast<String, Tensor>();
   }
 }
 
@@ -202,16 +250,22 @@ Future<Tensor?> _tryAccelerate(
 class _Frame {
   final OnnxSession session;
   final symbols = <String, int>{};
-  final Map<String, Tensor> values;
+  final Map<String, OnnxValue> values;
   final Map<String, int> remaining;
-  _Frame(this.session, Map<String, Tensor> feeds)
-      : values = {...session._weights},
+  _Frame(
+      this.session, Map<String, OnnxValue> feeds, Map<String, OnnxValue> outer)
+      : values = {
+          for (final k in session._captures) k: outer[k]!,
+          ...session._weights
+        },
         remaining = {...session._uses} {
     for (final name in feeds.keys) {
       _require(session.inputs.containsKey(name), 'Unknown graph input $name');
     }
     for (final info in session.inputs.values) {
-      final value = feeds[info.name] ?? session._weights[info.name];
+      final value = feeds[info.name] ??
+          session._weights[info.name] ??
+          (info.kind == "optional" ? const OnnxOptional(null) : null);
       if (value == null)
         throw ArgumentError('Missing graph input ${info.name}');
       info._check(value, symbols);
@@ -219,21 +273,21 @@ class _Frame {
     }
   }
 
-  List<Tensor?> args(_Node n) => n.inputs.map((key) => values[key]).toList();
-  void store(_Node n, List<Tensor> outputs) {
+  List<OnnxValue?> args(_Node n) => n.inputs.map((key) => values[key]).toList();
+  void store(_Node n, List<OnnxValue> outputs) {
     for (final (i, key) in n.outputs.indexed) {
       if (key.isNotEmpty &&
           (remaining.containsKey(key) || session.outputs.containsKey(key)))
         values[key] = outputs[i];
     }
-    for (final k in n.inputs.where((s) => s.isNotEmpty)) {
+    for (final k in n.references) {
       if ((remaining[k] = remaining[k]! - 1) == 0 &&
           !session.outputs.containsKey(k)) values.remove(k);
     }
   }
 
-  Map<String, Tensor> results() {
-    final result = <String, Tensor>{};
+  Map<String, OnnxValue> results() {
+    final result = <String, OnnxValue>{};
     for (final info in session.outputs.values) {
       final t = values[info.name]!;
       info._check(t, symbols);
@@ -248,7 +302,15 @@ class _Node {
   final List<String> outputs;
   final List<String> inputs;
   final Map<String, Object> attrs;
+  late final math.Random random = math.Random((attrs["seed"] as num?)?.toInt());
   _Node(this.op, this.label, this.outputs, this.inputs, this.attrs);
+
+  Iterable<String> get references sync* {
+    yield* inputs.where((s) => s.isNotEmpty);
+    for (final child in attrs.values.whereType<OnnxSession>()) {
+      yield* child._captures;
+    }
+  }
 
   factory _Node.read(_Proto p, int opset) {
     final domain = p.string(7);
@@ -260,7 +322,7 @@ class _Node {
       throw UnsupportedError('$label: unsupported operator domain or type');
     final outs = p.strings(2);
     if (outs.isEmpty ||
-        outs.first.isEmpty ||
+        (outs.first.isEmpty && !const {'RNN', 'GRU', 'LSTM'}.contains(op)) ||
         (!const {
               'Attention',
               'RMSNormalization',
@@ -270,7 +332,19 @@ class _Node {
               'Dropout',
               'CausalConvWithState',
               'LinearAttention',
-              'DynamicQuantizeLinear'
+              'DynamicQuantizeLinear',
+              'RNN',
+              'GRU',
+              'LSTM',
+              'SoftmaxCrossEntropyLoss',
+              'StringSplit',
+              'Unique',
+              'BatchNormalization',
+              'MaxPool',
+              'If',
+              'Loop',
+              'Scan',
+              'SequenceMap'
             }.contains(op) &&
             outs.skip(1).any((s) => s.isNotEmpty)))
       throw UnsupportedError('$label: requires one output');
@@ -296,7 +370,15 @@ class _Node {
         2 => a.integer(3),
         3 => a.string(4),
         4 => _tensor(a.message(5)),
+        5 => OnnxSession._readGraph(a.message(6), opset, allowCapture: true),
+        13 => TensorInfo._type(key, a.message(14)),
+        6 => [
+            for (final field in a.all(7))
+              for (var i = 0; i < (field as Uint8List).length; i += 4)
+                ByteData.sublistView(field).getFloat32(i, Endian.little)
+          ],
         7 => a.ints(8).toList(),
+        8 => a.strings(9),
         _ => throw UnsupportedError('$label: attribute $key'),
       };
     }
@@ -363,7 +445,7 @@ const _schemas = <String, (int, int, Map<String, int>)>{
   'OneHot': (3, 3, {'axis': 2}),
   'ReverseSequence': (2, 2, {'time_axis': 2, 'batch_axis': 2}),
   'DepthToSpace': (1, 1, {'blocksize': 2, 'mode': 3}),
-  'SpaceToDepth': (1, 1, {'blocksize': 2}),
+  'SpaceToDepth': (1, 1, {'blocksize': 2, 'mode': 3}),
   'Pad': (2, 4, {'mode': 3}),
   'CenterCropPad': (2, 2, {'axes': 7}),
   'Scatter': (3, 3, {'axis': 2, 'reduction': 3}),
@@ -410,6 +492,239 @@ const _schemas = <String, (int, int, Map<String, int>)>{
     }
   ),
   'DynamicQuantizeLinear': (1, 1, {}),
+  'CausalConvWithState': (2, 4, {'activation': 3}),
+  'LinearAttention': (
+    3,
+    6,
+    {
+      'q_num_heads': 2,
+      'kv_num_heads': 2,
+      'scale': 1,
+      'chunk_size': 2,
+      'update_rule': 3
+    }
+  ),
+  'NegativeLogLikelihoodLoss': (2, 3, {'ignore_index': 2, 'reduction': 3}),
+  'SoftmaxCrossEntropyLoss': (2, 3, {'ignore_index': 2, 'reduction': 3}),
+  'TensorScatter': (2, 3, {'mode': 3, 'axis': 2}),
+  'Mish': (1, 1, {}),
+  'NonMaxSuppression': (2, 5, {'center_point_box': 2}),
+  'Unique': (1, 1, {'axis': 2, 'sorted': 2}),
+  'StringConcat': (2, 2, {}),
+  'StringSplit': (1, 1, {'delimiter': 3, 'maxsplit': 2}),
+  'RegexFullMatch': (1, 1, {'pattern': 3}),
+  'StringNormalizer': (
+    1,
+    1,
+    {
+      'case_change_action': 3,
+      'is_case_sensitive': 2,
+      'locale': 3,
+      'stopwords': 8
+    }
+  ),
+  'RNN': (
+    3,
+    8,
+    {
+      'clip': 1,
+      'activation_alpha': 6,
+      'activation_beta': 6,
+      'activations': 8,
+      'hidden_size': 2,
+      'input_forget': 2,
+      'linear_before_reset': 2,
+      'layout': 2,
+      'direction': 3
+    }
+  ),
+  'GRU': (
+    3,
+    8,
+    {
+      'clip': 1,
+      'activation_alpha': 6,
+      'activation_beta': 6,
+      'activations': 8,
+      'hidden_size': 2,
+      'input_forget': 2,
+      'linear_before_reset': 2,
+      'layout': 2,
+      'direction': 3
+    }
+  ),
+  'LSTM': (
+    3,
+    8,
+    {
+      'clip': 1,
+      'activation_alpha': 6,
+      'activation_beta': 6,
+      'activations': 8,
+      'hidden_size': 2,
+      'input_forget': 2,
+      'linear_before_reset': 2,
+      'layout': 2,
+      'direction': 3
+    }
+  ),
+  'If': (1, 1, {'then_branch': 5, 'else_branch': 5}),
+  'Loop': (0, 2147483647, {'body': 5}),
+  'Scan': (
+    1,
+    2147483647,
+    {
+      'body': 5,
+      'num_scan_inputs': 2,
+      'scan_input_axes': 7,
+      'scan_output_axes': 7,
+      'scan_input_directions': 7,
+      'scan_output_directions': 7
+    }
+  ),
+  'SequenceMap': (1, 2147483647, {'body': 5}),
+  'SequenceConstruct': (1, 2147483647, {}),
+  'SequenceLength': (1, 1, {}),
+  'SequenceAt': (2, 2, {}),
+  'SequenceErase': (1, 2, {}),
+  'SequenceInsert': (2, 3, {}),
+  'SequenceEmpty': (0, 0, {'dtype': 2}),
+  'SplitToSequence': (1, 2, {'axis': 2, 'keepdims': 2}),
+  'ConcatFromSequence': (1, 1, {'axis': 2, 'new_axis': 2}),
+  'Optional': (0, 1, {'type': 13}),
+  'OptionalHasElement': (0, 1, {}),
+  'OptionalGetElement': (1, 1, {}),
+  'AffineGrid': (2, 2, {'align_corners': 2}),
+  'GridSample': (2, 2, {'align_corners': 2, 'padding_mode': 3, 'mode': 3}),
+  'Resize': (
+    1,
+    4,
+    {
+      'keep_aspect_ratio_policy': 3,
+      'axes': 7,
+      'antialias': 2,
+      'extrapolation_value': 1,
+      'exclude_outside': 2,
+      'nearest_mode': 3,
+      'coordinate_transformation_mode': 3,
+      'cubic_coeff_a': 1,
+      'mode': 3
+    }
+  ),
+  'Upsample': (2, 2, {'mode': 3}),
+  'RoiAlign': (
+    3,
+    3,
+    {
+      'coordinate_transformation_mode': 3,
+      'mode': 3,
+      'output_height': 2,
+      'output_width': 2,
+      'sampling_ratio': 2,
+      'spatial_scale': 1
+    }
+  ),
+  'MaxRoiPool': (2, 2, {'pooled_shape': 7, 'spatial_scale': 1}),
+  'Einsum': (1, 2147483647, {'equation': 3}),
+  'DFT': (1, 3, {'inverse': 2, 'onesided': 2, 'axis': 2}),
+  'STFT': (2, 4, {'onesided': 2}),
+  'MelWeightMatrix': (5, 5, {'output_datatype': 2}),
+  'RandomNormal': (
+    0,
+    0,
+    {'mean': 1, 'scale': 1, 'seed': 1, 'shape': 7, 'dtype': 2}
+  ),
+  'RandomNormalLike': (1, 1, {'mean': 1, 'scale': 1, 'seed': 1, 'dtype': 2}),
+  'RandomUniform': (
+    0,
+    0,
+    {'high': 1, 'low': 1, 'seed': 1, 'shape': 7, 'dtype': 2}
+  ),
+  'RandomUniformLike': (1, 1, {'high': 1, 'low': 1, 'seed': 1, 'dtype': 2}),
+  'Multinomial': (1, 1, {'dtype': 2, 'sample_size': 2, 'seed': 1}),
+  'Bernoulli': (1, 1, {'dtype': 2, 'seed': 1}),
+  'TfIdfVectorizer': (
+    1,
+    1,
+    {
+      'mode': 3,
+      'ngram_indexes': 7,
+      'ngram_counts': 7,
+      'weights': 6,
+      'pool_int64s': 7,
+      'pool_strings': 8,
+      'min_gram_length': 2,
+      'max_gram_length': 2,
+      'max_skip_count': 2
+    }
+  ),
+  'ImageDecoder': (1, 1, {'pixel_format': 3}),
+  'Col2Im': (3, 3, {'strides': 7, 'pads': 7, 'dilations': 7}),
+  'MaxUnpool': (2, 3, {'pads': 7, 'strides': 7, 'kernel_shape': 7}),
+  'LpPool': (
+    1,
+    1,
+    {
+      'p': 2,
+      'auto_pad': 3,
+      'kernel_shape': 7,
+      'pads': 7,
+      'strides': 7,
+      'dilations': 7,
+      'ceil_mode': 2
+    }
+  ),
+  'ConvTranspose': (
+    2,
+    3,
+    {
+      'group': 2,
+      'auto_pad': 3,
+      'kernel_shape': 7,
+      'pads': 7,
+      'strides': 7,
+      'dilations': 7,
+      'output_shape': 7,
+      'output_padding': 7
+    }
+  ),
+  'DeformConv': (
+    3,
+    5,
+    {
+      'group': 2,
+      'auto_pad': 3,
+      'kernel_shape': 7,
+      'pads': 7,
+      'strides': 7,
+      'dilations': 7,
+      'offset_group': 2
+    }
+  ),
+  'ConvInteger': (
+    2,
+    4,
+    {
+      'group': 2,
+      'auto_pad': 3,
+      'kernel_shape': 7,
+      'pads': 7,
+      'strides': 7,
+      'dilations': 7
+    }
+  ),
+  'QLinearConv': (
+    8,
+    9,
+    {
+      'group': 2,
+      'auto_pad': 3,
+      'kernel_shape': 7,
+      'pads': 7,
+      'strides': 7,
+      'dilations': 7
+    }
+  ),
   'Clip': (1, 3, {}),
   'HardSigmoid': (1, 1, {'alpha': 1, 'beta': 1}),
   'HardSwish': (1, 1, {}),
@@ -462,7 +777,7 @@ const _schemas = <String, (int, int, Map<String, int>)>{
   'Range': (3, 3, {}),
   'Squeeze': (1, 2, {}),
   'Unsqueeze': (2, 2, {}),
-  'Cast': (1, 1, {'to': 2, 'saturate': 2}),
+  'Cast': (1, 1, {'to': 2, 'saturate': 2, 'round_mode': 3}),
   'ConstantOfShape': (1, 1, {'value': 4}),
   'ScatterND': (3, 3, {'reduction': 3}),
   'Slice': (3, 5, {}),
@@ -506,7 +821,19 @@ const _schemas = <String, (int, int, Map<String, int>)>{
   'Flatten': (1, 1, {'axis': 2}),
   'Reshape': (2, 2, {'allowzero': 2}),
   'Transpose': (1, 1, {'perm': 7}),
-  'Constant': (0, 0, {'value': 4}),
+  'Constant': (
+    0,
+    0,
+    {
+      'value': 4,
+      'value_float': 1,
+      'value_floats': 6,
+      'value_int': 2,
+      'value_ints': 7,
+      'value_string': 3,
+      'value_strings': 8
+    }
+  ),
   'Concat': (1, 0x7fffffff, {'axis': 2}),
   'Conv': (
     2,
@@ -538,6 +865,7 @@ const _schemas = <String, (int, int, Map<String, int>)>{
     1,
     {
       'kernel_shape': 7,
+      'dilations': 7,
       'auto_pad': 3,
       'pads': 7,
       'strides': 7,

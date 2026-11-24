@@ -12,7 +12,7 @@ from onnx.backend.test.case.node import collect_testcases
 from verify_models import exchange
 
 
-def assess(binary, folder):
+def assess(binary, folder, selected=None, verbose=False):
     if onnx.__version__ != '1.23.2':
         raise ValueError('Use onnx==1.23.2 for the opset 28 baseline')
     schemas={s.name:s for s in onnx.defs.get_all_schemas() if not s.domain}
@@ -27,6 +27,7 @@ def assess(binary, folder):
                 # Expanded function bodies exercise a different graph, and are
                 # covered separately from the operator's own unexpanded cases.
                 if '_expanded' in case.name or len(model.graph.node)!=1: continue
+                if selected and case.name not in selected: continue
                 node=model.graph.node[0]
                 if node.domain or node.op_type not in schemas: continue
                 record=results[node.op_type]
@@ -53,6 +54,7 @@ def assess(binary, folder):
                                  rtol=case.rtol,atol=case.atol)
                     record[case.name]='pass'
                 except Exception as exc:
+                    if verbose: print(case.name,str(exc),flush=True)
                     reason=str(exc).strip().splitlines()
                     record[case.name]=(reason[0] if reason else type(exc).__name__)[:180]
         finally: proc.stdin.close()
@@ -61,6 +63,8 @@ def assess(binary, folder):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--case',action='append',help='Run an individual upstream case (repeatable).')
+    parser.add_argument('--verbose',action='store_true')
     parser.add_argument('--runner',type=Path)
     parser.add_argument('--report',type=Path)
     parser.add_argument('--baseline',type=Path,help='Fail if a previously passing case regresses.')
@@ -70,7 +74,7 @@ def main():
         folder=Path(tmp)
         binary=args.runner.resolve() if args.runner else folder/'compare'
         if not args.runner: subprocess.run(['dart','compile','exe','tool/compare_runner.dart','-o',str(binary)],check=True)
-        results=assess(binary,folder)
+        results=assess(binary,folder,args.case,args.verbose)
     if args.report:
         args.report.write_text(json.dumps(results,indent=2,sort_keys=True)+'\n')
     counts=collections.Counter(status=='pass' for cases in results.values() for status in cases.values())

@@ -1,6 +1,6 @@
 # flutter_onnx
 
-Load an ONNX graph once and run it locally on Flutter web, Android, or iOS. The Dart package implements protobuf model decoding, graph execution, tensor broadcasting and CPU kernels. It has zero runtime dependencies. A companion Flutter plugin can send matrix products to the device.
+Load an ONNX graph once and run it locally on Flutter web, Android, or iOS. The Dart package implements protobuf model decoding, graph execution, tensor broadcasting and CPU kernels. ImageDecoder uses the Dart `image` package for image codecs. A companion Flutter plugin can send matrix products to the device.
 
 ## Install
 
@@ -56,7 +56,7 @@ For CPU-only use, install the core package with `flutter pub add flutter_onnx --
 
 The compatibility target is the standard ONNX domain at **opset 28** (ONNX 1.23.2). Implementation is partial. The loader accepts binary graphs declaring opsets 13–28 and IR versions 3–14. A supported version number alone does not establish that all operators, types and attributes in a particular graph will execute.
 
-The [verification report](VERIFICATION.md) records upstream node-test coverage and actual model results. The runtime includes NCHW convolution, grouped convolution, pooling, matrix products, broadcasting, indexing, reductions, quantization, normalization, rotary embeddings and grouped-query attention with caches. It also implements the four-bit `com.microsoft::MatMulNBits` block format used by the tested Qwen export. Initializers can contain inline raw bytes or protobuf values. External weights, sequences and model-local functions remain compatibility gaps.
+The [verification report](VERIFICATION.md) records upstream node-test coverage and actual model results. The runtime includes NCHW convolution, grouped convolution, pooling, matrix products, broadcasting, indexing, reductions, quantization, normalization, rotary embeddings and grouped-query attention with caches. It also implements the four-bit `com.microsoft::MatMulNBits` block format used by the tested Qwen export. Initializers can contain inline raw bytes or protobuf values. Use `runValues` for graphs with sequences and optional values. Model-local functions remain a compatibility gap.
 
 CPU inference is synchronous. Mobile devices and browsers impose different memory limits. The model comparisons use the native Dart CPU engine. Platform integration tests use a small bundled graph. The WebGPU test requires a real compute dispatch on a software adapter.
 

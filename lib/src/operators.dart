@@ -2,6 +2,15 @@ part of '../flutter_onnx.dart';
 
 Tensor _execute(_Node n, List<Tensor?> args) {
   if (n.op == 'Constant') {
+    for (final e in n.attrs.entries) {
+      final v = e.value;
+      if (v is int) return Tensor.int64([], [v]);
+      if (v is double) return Tensor.float32([], [v]);
+      if (v is String) return Tensor.strings([], [v]);
+      if (v is List<int>) return Tensor.int64([v.length], v);
+      if (v is List<double>) return Tensor.float32([v.length], v);
+      if (v is List<String>) return Tensor.strings([v.length], v);
+    }
     final t = n.attrs['value'];
     if (t is! Tensor)
       throw UnsupportedError('${n.label}: expected tensor-valued Constant');

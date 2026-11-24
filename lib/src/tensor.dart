@@ -13,22 +13,63 @@ enum TensorType {
   float64(11, 8),
   uint32(12, 4),
   uint64(13, 8),
-  bfloat16(16, 2);
+  string(8, 0),
+  bfloat16(16, 2),
+  float8e4m3fn(17, 1),
+  float8e4m3fnuz(18, 1),
+  float8e5m2(19, 1),
+  float8e5m2fnuz(20, 1),
+  uint4(21, 0),
+  int4(22, 0),
+  float4e2m1(23, 0),
+  float8e8m0(24, 1),
+  uint2(25, 0),
+  int2(26, 0),
+  float6e2m3(27, 0),
+  float6e3m2(28, 0);
+
+  int get bitWidth => switch (this) {
+        uint2 || int2 => 2,
+        uint4 || int4 || float4e2m1 => 4,
+        float6e2m3 || float6e3m2 => 6,
+        _ => bytesPerElement * 8
+      };
+  bool get compact => onnxId >= 17;
+  bool get smallInteger =>
+      this == int4 || this == uint4 || this == int2 || this == uint2;
 
   const TensorType(this.onnxId, this.bytesPerElement);
   final int onnxId, bytesPerElement;
   bool get floating =>
-      this == float32 || this == float16 || this == float64 || this == bfloat16;
+      this == float32 ||
+      this == float16 ||
+      this == float64 ||
+      this == bfloat16 ||
+      (compact && !smallInteger);
 }
 
 /// A dense, immutable tensor stored in ONNX row-major order.
-class Tensor {
+class Tensor implements OnnxValue {
   final TensorType type;
   final List<int> shape;
-  final List<num> values;
+  final List<num>? _numbers;
+  final List<String>? _strings;
+  List<num> get values =>
+      _numbers ?? (throw StateError('Use stringValues for a STRING tensor'));
+  List<String> get stringValues =>
+      _strings ?? (throw StateError('Expected STRING tensor'));
+  int get length => _numbers?.length ?? _strings!.length;
+  Tensor.strings(List<int> shape, Iterable<String> values)
+      : type = TensorType.string,
+        shape = List.unmodifiable(shape),
+        _strings = List.unmodifiable(values),
+        _numbers = null {
+    _require(_size(shape) == length, 'String data length differs from shape');
+  }
 
-  Tensor._(this.type, List<int> shape, this.values)
-      : shape = List.unmodifiable(shape) {
+  Tensor._(this.type, List<int> shape, this._numbers)
+      : _strings = null,
+        shape = List.unmodifiable(shape) {
     if (_size(shape) != values.length) {
       throw ArgumentError(
           'Shape $shape does not match ${values.length} values');
@@ -53,6 +94,8 @@ class Tensor {
   /// Construct a tensor of the given numeric type. BOOL uses zero and one.
   factory Tensor.fromValues(
       TensorType type, List<int> shape, Iterable<num> values) {
+    if (type == TensorType.string) throw ArgumentError('Use Tensor.strings');
+    if (type.compact) return _compactFromValues(type, shape, values);
     if (type == TensorType.float32) return Tensor.float32(shape, values);
     if (type == TensorType.int64)
       return Tensor.int64(shape, values.map((v) => v.toInt()));
@@ -104,6 +147,10 @@ class Tensor {
 
   /// Returns an independent copy of the little-endian ONNX raw_data bytes.
   Uint8List toBytes() {
+    if (type == TensorType.string)
+      throw UnsupportedError('STRING uses ONNX string_data');
+    if (type.compact) return _encodeCompact(this);
+
     if (values is TypedData &&
         type != TensorType.float16 &&
         type != TensorType.bfloat16 &&
@@ -140,12 +187,16 @@ class Tensor {
         case TensorType.uint32:
         case TensorType.int32:
           out.setUint32(p, v.toInt(), Endian.little);
+        default:
+          throw StateError(type.name);
       }
     }
     return out.buffer.asUint8List();
   }
 
-  Tensor _reshape(List<int> dims) => Tensor._(type, dims, values);
+  Tensor _reshape(List<int> dims) => type == TensorType.string
+      ? Tensor.strings(dims, stringValues)
+      : Tensor._(type, dims, values);
 }
 
 const _maxSafe = 9007199254740991;
@@ -172,6 +223,9 @@ Tensor _float(List<int> shape, double Function(int) value) {
 }
 
 Tensor _reorder(Tensor x, List<int> shape, int Function(int) offset) {
+  if (x.type == TensorType.string)
+    return Tensor.strings(
+        shape, List.generate(_size(shape), (i) => x.stringValues[offset(i)]));
   if (x.type == TensorType.float32) {
     return _float(shape, (i) => x.values[offset(i)].toDouble());
   }
@@ -205,6 +259,17 @@ Tensor _decodeRaw(TensorType type, List<int> shape, Uint8List bytes,
       width = type.bytesPerElement,
       d = ByteData.sublistView(bytes),
       store = ByteData(4);
+  if (type.compact) {
+    if (bytes.length != (count * type.bitWidth + 7) ~/ 8)
+      throw const FormatException('Wrong packed tensor length');
+    return Tensor._(
+        type,
+        shape,
+        List<num>.unmodifiable(List.generate(
+            count,
+            (i) => _compactValue(
+                type, _readPacked(bytes, i * type.bitWidth, type.bitWidth)))));
+  }
   if (bytes.length != count * width)
     throw const FormatException('Incorrect raw_data length');
   if (type == TensorType.float32)

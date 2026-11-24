@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import urllib.request
 
+import onnx
 import numpy as np
 import onnxruntime as ort
 
@@ -49,14 +50,17 @@ def obtain(name, cache):
 
 
 def exchange(proc, folder, model, feeds, expected, cache_names=None, *, predictions=True, atol=1e-4, rtol=1e-4):
-    inputs={}
-    for i,(name,data) in enumerate(feeds.items()):
-        if cache_names and name in cache_names:
-            inputs[name]=cache_names[name]
-        else:
-            path=folder/f'feed-{i}.bin'
-            data.tofile(path)
-            inputs[name]={'file':str(path),'shape':list(data.shape),'dtype':str(data.dtype)}
+    def pack(data, label):
+        if data is None: return None
+        if isinstance(data, list): return [pack(x,f'{label}-{i}') for i,x in enumerate(data)]
+        path=folder/f'feed-{label}.bin'
+        tensor=onnx.numpy_helper.from_array(data)
+        if tensor.data_type==onnx.TensorProto.STRING:
+            path.write_text(json.dumps([v.decode('utf8') for v in tensor.string_data]))
+        else: path.write_bytes(tensor.raw_data)
+        return {'file':str(path),'shape':list(data.shape),'type':tensor.data_type}
+    inputs={name:cache_names[name] if cache_names and name in cache_names else pack(data,i)
+            for i,(name,data) in enumerate(feeds.items())}
     proc.stdin.write(json.dumps({'model':str(model),'directory':str(folder),'feeds':inputs})+'\n')
     proc.stdin.flush()
     line=proc.stdout.readline()
@@ -65,19 +69,34 @@ def exchange(proc, folder, model, feeds, expected, cache_names=None, *, predicti
     if 'error' in reply: raise RuntimeError(f"{reply['error']}\n{reply['trace']}")
     assert reply['outputs'].keys()==expected.keys()
     worst=0.
-    for name,ref in expected.items():
-        result=reply['outputs'][name]
-        assert result['dtype']==str(ref.dtype), (name,result['dtype'],ref.dtype)
+    def check(name,result,ref):
+        nonlocal worst
+        if ref is None: assert result is None; return
+        if isinstance(ref,list):
+            assert isinstance(result,list) and len(ref)==len(result)
+            for i,(r,v) in enumerate(zip(result,ref)):check(f'{name}[{i}]',r,v)
+            return
+        expected_type=onnx.numpy_helper.from_array(ref).data_type
+        assert result['type']==expected_type, (name,result['type'],expected_type)
         assert result['shape']==list(ref.shape), (name,result['shape'],ref.shape)
-        actual=np.fromfile(result['file'],dtype=ref.dtype).reshape(ref.shape)
-        if ref.dtype.kind in 'biu':
+        path=Path(result['file'])
+        if expected_type==onnx.TensorProto.STRING:
+            actual=np.array(json.loads(path.read_text()),dtype=object).reshape(ref.shape)
+            ref=np.array([v.decode('utf8') if isinstance(v,bytes) else str(v) for v in ref.flat],dtype=object).reshape(ref.shape)
+        else:
+            tensor=onnx.TensorProto(data_type=expected_type,dims=ref.shape,raw_data=path.read_bytes())
+            actual=onnx.numpy_helper.to_array(tensor)
+        if ref.dtype.kind in 'biuO' or expected_type in [21,22,25,26]:
             np.testing.assert_array_equal(actual,ref,err_msg=name)
         else:
+            actual=actual.astype('float64');ref=ref.astype('float64')
             np.testing.assert_allclose(actual,ref,rtol=rtol,atol=atol,err_msg=name)
         if predictions and (name=='logits' or len(expected)==1):
             np.testing.assert_array_equal(actual.argmax(axis=-1),ref.argmax(axis=-1))
         if ref.dtype.kind=='f':
-            worst=max(worst,float(np.max(np.abs(actual-ref),initial=0)))
+            finite=np.isfinite(actual) & np.isfinite(ref)
+            worst=max(worst,float(np.max(np.abs(actual[finite]-ref[finite]),initial=0)))
+    for name,ref in expected.items(): check(name,reply['outputs'][name],ref)
     return worst
 
 

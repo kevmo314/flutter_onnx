@@ -15,7 +15,7 @@ Tensor? _arrayOp(_Node n, List<Tensor?> args) {
   final x = args.first!, shape = x.shape;
   switch (n.op) {
     case 'Size':
-      return Tensor.int64([], [x.values.length]);
+      return Tensor.int64([], [x.length]);
     case 'ScatterND':
       final indices = args[1]!, updates = args[2]!, coords = _indices(indices);
       _require(indices.shape.isNotEmpty, 'ScatterND needs ranked indices');
@@ -81,7 +81,7 @@ Tensor? _arrayOp(_Node n, List<Tensor?> args) {
       return x._reshape(
           [for (var i = 0; i < rank; i++) set.contains(i) ? 1 : shape[pos++]]);
     case 'Cast':
-      return Tensor.fromValues(_type(n.integer('to', 0)), shape, x.values);
+      return _cast(x, _type(n.integer('to', 0)), n);
     case 'ConstantOfShape':
       final value = n.attrs['value'] as Tensor?;
       if (value != null)
@@ -339,8 +339,11 @@ Tensor _reduce(_Node n, Tensor x, Tensor? axesTensor) {
     if (keep || !axes.contains(i)) j++;
   }
   final size = _size(dims), acc = Float64List(size);
-  if (n.op == 'ReduceMax') acc.fillRange(0, size, double.negativeInfinity);
-  if (n.op == 'ReduceMin') acc.fillRange(0, size, double.infinity);
+  if (n.op == 'ReduceMax')
+    acc.fillRange(
+        0, size, x.type == TensorType.boolean ? 0 : double.negativeInfinity);
+  if (n.op == 'ReduceMin')
+    acc.fillRange(0, size, x.type == TensorType.boolean ? 1 : double.infinity);
   if (n.op == 'ReduceProd') acc.fillRange(0, size, 1);
   for (var i = 0; i < x.values.length; i++) {
     var dest = 0;
