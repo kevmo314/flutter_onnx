@@ -1,0 +1,20 @@
+name: flutter_onnx_accelerators
+description: Optional WebGPU, Metal Performance Shaders and Android NNAPI matrix kernels for flutter_onnx.
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: '>=3.5.0 <4.0.0'
+  flutter: '>=3.24.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_onnx:
+    path: ..
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: dev.flutteronnx.accelerators
+        pluginClass: FlutterOnnxAcceleratorsPlugin
+      ios:
+        pluginClass: FlutterOnnxAcceleratorsPlugin

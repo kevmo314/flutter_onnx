@@ -1,0 +1,73 @@
+name: Platform inference
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.9'
+          cache: true
+      - run: dart pub get
+      - run: dart analyze lib test
+      - run: dart test -p vm
+      - run: dart test -p chrome
+      - run: flutter pub get
+        working-directory: example
+      - run: flutter build web
+        working-directory: example
+      - name: Exercise WebGPU with Chromium's software Vulkan adapter
+        working-directory: example
+        run: |
+          cat > "$RUNNER_TEMP/chrome-gpu" <<'SH'
+          #!/bin/sh
+          exec google-chrome --enable-unsafe-webgpu --enable-unsafe-swiftshader --use-angle=swiftshader "$@"
+          SH
+          chmod +x "$RUNNER_TEMP/chrome-gpu"
+          CHROME_EXECUTABLE="$RUNNER_TEMP/chrome-gpu" flutter test --platform chrome --dart-define=REQUIRE_WEBGPU=true test/webgpu_test.dart
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.9'
+          cache: true
+      - run: flutter pub get
+        working-directory: example
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          working-directory: example
+          script: flutter test integration_test/inference_test.dart -d emulator-5554
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.9'
+          cache: true
+      - name: Run inference on an iPhone simulator
+        working-directory: example
+        run: |
+          simulator=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; print(next(d["udid"] for rt,ds in json.load(sys.stdin)["devices"].items() if ".iOS-" in rt for d in ds if d["name"].startswith("iPhone")))')
+          xcrun simctl boot "$simulator"
+          xcrun simctl bootstatus "$simulator" -b
+          flutter pub get
+          flutter test integration_test/inference_test.dart -d "$simulator"

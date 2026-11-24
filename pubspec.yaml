@@ -1,0 +1,12 @@
+name: flutter_onnx
+description: A Dart implementation of ONNX inference for Flutter web, Android, and iOS.
+version: 0.1.0
+repository: https://github.com/kevmo314/flutter_onnx
+environment:
+  sdk: '>=3.5.0 <4.0.0'
+platforms:
+  android:
+  ios:
+  web:
+dev_dependencies:
+  test: ^1.25.0

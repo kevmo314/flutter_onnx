@@ -1,0 +1,22 @@
+name: flutter_onnx_example
+description: Run an ONNX XOR network with the available device backend.
+publish_to: none
+version: 1.0.0+1
+environment:
+  sdk: '>=3.5.0 <4.0.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_onnx:
+    path: ..
+  flutter_onnx_accelerators:
+    path: ../accelerators
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/xor.onnx
