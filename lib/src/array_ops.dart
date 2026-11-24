@@ -248,6 +248,19 @@ Tensor? _arrayOp(_Node n, List<Tensor?> args) {
       const {'Pow', 'PRelu'}.contains(n.op) ||
       (!x.type.floating && const {'Add', 'Mul', 'Div', 'Sub'}.contains(n.op))) {
     final b = args[1]!, dims = _broadcastShape(shape, b.shape);
+    if (n.op == 'PRelu' &&
+        x.type == TensorType.float32 &&
+        b.type == x.type &&
+        b.length == 1 &&
+        _sameShape(shape, dims)) {
+      final source = x.values as Float32List, out = Float32List(x.length);
+      final slope = b.values.single.toDouble();
+      for (var i = 0; i < out.length; i++) {
+        final value = source[i];
+        out[i] = value < 0 ? value * slope : value;
+      }
+      return Tensor._(x.type, shape, out.asUnmodifiableView());
+    }
     final ia = _IndexMap(shape, dims), ib = _IndexMap(b.shape, dims);
     if ((x.type == TensorType.int64 || x.type == TensorType.uint64) &&
         x.type == b.type &&

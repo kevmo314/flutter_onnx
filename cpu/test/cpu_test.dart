@@ -196,6 +196,42 @@ void main() {
       }
     },
   );
+  test(
+    'scaling a residual rounds the product and preserves exposed edges',
+    () async {
+      final x = List<num>.generate(
+        12,
+        (i) => i % 6 < 2 ? 1 + 1 / 8388608 : i - 4,
+      );
+      final r = List<num>.generate(
+        12,
+        (i) => i % 6 < 2 ? -1 - 1 / 4194304 : 0.125 * i,
+      );
+      final feeds = {
+        'x': Tensor.float32([2, 3, 2], x),
+        'r': Tensor.float32([2, 3, 2], r),
+      };
+      for (final expose in [true, false]) {
+        final graph = OnnxSession.fromBytes(
+          base64Decode(
+            expose
+                ? 'CA46rQEKDgoBcwoBeBIBcCIDTXVsChAKAXIKAXASA291dCIDQWRkEghyZXNpZHVhbCoZCAEIAwgBEAEiDAEAgD8AAAA/AACAvkIBc1oXCgF4EhIKEAgBEgwKAggCCgIIAwoCCAJaFwoBchISChAIARIMCgIIAgoCCAMKAggCYhkKA291dBISChAIARIMCgIIAgoCCAMKAggCYhcKAXASEgoQCAESDAoCCAIKAggDCgIIAkIECgAQEg=='
+                : 'CA46lAEKDgoBcwoBeBIBcCIDTXVsChAKAXIKAXASA291dCIDQWRkEghyZXNpZHVhbCoZCAEIAwgBEAEiDAEAgD8AAAA/AACAvkIBc1oXCgF4EhIKEAgBEgwKAggCCgIIAwoCCAJaFwoBchISChAIARIMCgIIAgoCCAMKAggCYhkKA291dBISChAIARIMCgIIAgoCCAMKAggCQgQKABAS',
+          ),
+        );
+        final accelerated = <String>[];
+        final y = await graph.runAsync(
+          feeds,
+          backend: backend,
+          onAccelerated: accelerated.add,
+        );
+        final ref = graph.run(feeds);
+        for (final key in ref.keys) expect(y[key]!.values, ref[key]!.values);
+        expect(y['out']!.values.first, 0);
+        expect(accelerated, hasLength(expose ? 0 : 1));
+      }
+    },
+  );
   test('batched strided dilated convolution agrees with scalar sums', () async {
     final graph = OnnxSession.fromBytes(
       base64Decode(

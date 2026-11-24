@@ -145,6 +145,29 @@ external void _depthwise(
   int end,
 );
 
+@Native<
+  Void Function(
+    Pointer<Float>,
+    Pointer<Float>,
+    Pointer<Float>,
+    Pointer<Float>,
+    Int32,
+    Int32,
+    Int32,
+    Int32,
+  )
+>(symbol: 'onnx_scaled_residual', isLeaf: true)
+external void _scaledResidual(
+  Pointer<Float> input,
+  Pointer<Float> scale,
+  Pointer<Float> residual,
+  Pointer<Float> out,
+  int channels,
+  int width,
+  int first,
+  int end,
+);
+
 class _PackedFilters implements Finalizable {
   static final _free = NativeFinalizer(malloc.nativeFree);
   final Pointer<Float> data;
@@ -330,6 +353,48 @@ class NativeCpuBackend implements ChannelwiseBackend {
         return null;
       return Float32List.fromList(y.asTypedList(size));
     }, malloc);
+  }
+
+  @override
+  Float32List? scaledResidual(
+    Tensor input,
+    Tensor channelScale,
+    Tensor residual,
+  ) {
+    if (input.type != TensorType.float32 ||
+        channelScale.type != input.type ||
+        residual.type != input.type ||
+        input.shape.length != 3 ||
+        channelScale.shape.length != 3 ||
+        residual.shape.length != 3 ||
+        input.length == 0 ||
+        input.length > 0x7fffffff)
+      return null;
+    final [batch, channels, width] = input.shape;
+    if (residual.shape[0] != batch ||
+        residual.shape[1] != channels ||
+        residual.shape[2] != width ||
+        channelScale.shape[0] != 1 ||
+        channelScale.shape[1] != channels ||
+        channelScale.shape[2] != 1)
+      return null;
+    final x = input.values as Float32List,
+        s = channelScale.values as Float32List;
+    final r = residual.values as Float32List, out = Float32List(input.length);
+    final tile = math.max(1, 131072 ~/ width);
+    for (var row = 0; row < batch * channels; row += tile) {
+      _scaledResidual(
+        x.address,
+        s.address,
+        r.address,
+        out.address,
+        channels,
+        width,
+        row,
+        math.min(row + tile, batch * channels),
+      );
+    }
+    return out;
   }
 
   @override

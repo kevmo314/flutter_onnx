@@ -81,8 +81,12 @@ class OnnxSession {
   final Map<String, int> _uses;
   late final List<_Node> _pointwiseNodes =
       _fusePointwiseGelu(_nodes, outputs, _uses);
-  late final List<_Node> _channelwiseNodes =
-      _fuseChannelNorm(_pointwiseNodes, outputs, _uses);
+  late final List<_Node> _channelwiseNodes = _fuseScaledResidual(
+      _fuseChannelNorm(_pointwiseNodes, outputs, _uses),
+      _weights,
+      inputs,
+      outputs,
+      _uses);
   final Set<String> _captures;
   OnnxSession._(this.opset, this.inputs, this.outputs, this._weights,
       this._nodes, this._uses, this._captures);
@@ -221,6 +225,7 @@ class OnnxSession {
               node.op == 'Gemm' ||
               node.op == _rowProduct ||
               node.op == 'Conv' ||
+              node.op == _scaledResidual ||
               node.op == _channelNorm ||
               node.op == _pointwiseGelu)
           ? await _tryAccelerate(node, args.cast<Tensor?>(), backend)
@@ -228,6 +233,9 @@ class OnnxSession {
       if (product != null) onAccelerated?.call(node.label);
       if (product != null) {
         frame.store(node, [product]);
+      } else if (node.op == _scaledResidual) {
+        final t = args.cast<Tensor>();
+        frame.store(node, [_binary('Add', t[2], _binary('Mul', t[1], t[0]))]);
       } else if (node.op == _channelNorm) {
         final tensors = args.cast<Tensor?>();
         final nlc = _transpose(tensors[0]!, [0, 2, 1]);
@@ -273,6 +281,44 @@ abstract interface class ChannelwiseBackend implements PointwiseConvBackend {
       Tensor input, Tensor scale, Tensor? bias, double epsilon);
   Float32List? depthwiseValid(
       Tensor input, Tensor weights, Tensor? bias, int dilation);
+  Float32List? scaledResidual(
+      Tensor input, Tensor channelScale, Tensor residual);
+}
+
+const _scaledResidual = '#ScaledResidual';
+List<_Node> _fuseScaledResidual(
+    List<_Node> nodes,
+    Map<String, Tensor> weights,
+    Map<String, TensorInfo> inputs,
+    Map<String, TensorInfo> outputs,
+    Map<String, int> uses) {
+  final products = <String, _Node>{};
+  final remove = <_Node>{}, replace = <_Node, _Node>{};
+  for (final n in nodes) {
+    if (n.function != null) continue;
+    if (n.op == 'Mul' &&
+        n.outputs.length == 1 &&
+        uses[n.outputs.single] == 1 &&
+        !outputs.containsKey(n.outputs.single)) {
+      if (inputs.containsKey(n.inputs.first)) continue;
+      final scale = weights[n.inputs.first];
+      if (scale != null &&
+          scale.type == TensorType.float32 &&
+          scale.shape.length == 3 &&
+          scale.shape[0] == 1 &&
+          scale.shape[2] == 1) products[n.outputs.single] = n;
+    } else if (n.op == 'Add') {
+      final product = products[n.inputs[1]];
+      if (product == null) continue;
+      remove.add(product);
+      replace[n] = _Node(_scaledResidual, n.label, n.outputs,
+          [product.inputs[1], product.inputs[0], n.inputs[0]], {});
+    }
+  }
+  return [
+    for (final n in nodes)
+      if (!remove.contains(n)) replace[n] ?? n
+  ];
 }
 
 const _channelNorm = '#ChannelNormalization';
@@ -343,6 +389,13 @@ List<_Node> _fusePointwiseGelu(
 
 Future<Tensor?> _tryAccelerate(
     _Node node, List<Tensor?> args, MatMulBackend backend) async {
+  if (node.op == _scaledResidual && backend is ChannelwiseBackend) {
+    final x = args[0]!;
+    final data = backend.scaledResidual(x, args[1]!, args[2]!);
+    return data == null
+        ? null
+        : Tensor._(x.type, x.shape, data.asUnmodifiableView());
+  }
   if (node.op == _channelNorm && backend is ChannelwiseBackend) {
     final x = args[0]!;
     final data = backend.normalizeChannels(

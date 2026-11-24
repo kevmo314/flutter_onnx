@@ -59,3 +59,24 @@ EXPORT void onnx_depthwise_valid(const float *x, const float *w,
     }
   }
 }
+
+// Keep the FLOAT Mul rounding before the residual Add. A fused hardware FMA
+// has a different result when the product is near a cancellation boundary.
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("fp-contract=off")))
+#endif
+EXPORT void onnx_scaled_residual(const float *input, const float *scale,
+                                 const float *residual, float *out,
+                                 int channels, int width, int first, int end) {
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
+  for (int row = first; row < end; ++row) {
+    float gamma = scale[row % channels];
+    size_t start = (size_t)row * width;
+    for (int t = 0; t < width; ++t) {
+      float product = gamma * input[start + t];
+      out[start + t] = residual[start + t] + product;
+    }
+  }
+}
