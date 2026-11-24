@@ -30,7 +30,8 @@ List<Tensor> _executeNode(_Node n, List<Tensor?> args) {
     case 'DeformConv':
       return [_convolve(n, args)];
     case 'Conv':
-      if (x!.shape.length != 4) return [_convolve(n, args)];
+      if (x!.shape.length != 4 || x.type == TensorType.float64)
+        return [_convolve(n, args)];
       return [_execute(n, args)];
     case 'BatchNormalization':
       if (n.integer('training_mode', 0) != 0)
@@ -385,7 +386,9 @@ List<Tensor> _attention(_Node n, List<Tensor?> args) {
               ? 0
               : rounded(
                   math.exp(rounded(state[j] - peak, precision)), precision);
-          sum += state[j];
+          sum = precision == TensorType.bfloat16
+              ? rounded(sum + state[j], precision)
+              : sum + state[j];
         }
         for (var j = 0; j < ks; j++) {
           final prob = sum == 0

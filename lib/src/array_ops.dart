@@ -224,6 +224,42 @@ Tensor? _arrayOp(_Node n, List<Tensor?> args) {
       (!x.type.floating && const {'Add', 'Mul', 'Div', 'Sub'}.contains(n.op))) {
     final b = args[1]!, dims = _broadcastShape(shape, b.shape);
     final ia = _IndexMap(shape, dims), ib = _IndexMap(b.shape, dims);
+    if ((x.type == TensorType.int64 || x.type == TensorType.uint64) &&
+        x.type == b.type &&
+        !const {'Pow', 'PRelu'}.contains(n.op)) {
+      final left = x.bigIntValues, right = b.bigIntValues;
+      if (comparisons.contains(n.op)) {
+        return _generate(TensorType.boolean, dims, (i) {
+          final a = left[ia.at(i)], c = right[ib.at(i)];
+          return (switch (n.op) {
+            'Equal' => a == c,
+            'Greater' => a > c,
+            'Less' => a < c,
+            'GreaterOrEqual' => a >= c,
+            'LessOrEqual' => a <= c,
+            _ => throw UnsupportedError(n.op)
+          })
+              ? 1
+              : 0;
+        });
+      }
+      return Tensor.bigInts(
+          x.type,
+          dims,
+          List.generate(_size(dims), (i) {
+            final a = left[ia.at(i)], c = right[ib.at(i)];
+            final v = switch (n.op) {
+              'Add' => a + c,
+              'Sub' => a - c,
+              'Mul' => a * c,
+              'Div' => a ~/ c,
+              _ => throw UnsupportedError(n.op)
+            };
+            return x.type == TensorType.int64
+                ? v.toSigned(64)
+                : v.toUnsigned(64);
+          }));
+    }
     return _generate(
         comparisons.contains(n.op) ? TensorType.boolean : x.type, dims, (i) {
       final a = x.values[ia.at(i)], c = b.values[ib.at(i)];

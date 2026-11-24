@@ -11,7 +11,7 @@ Tensor _execute(_Node n, List<Tensor?> args) {
       if (v is List<double>) return Tensor.float32([v.length], v);
       if (v is List<String>) return Tensor.strings([v.length], v);
     }
-    final t = n.attrs['value'];
+    final t = n.attrs['value'] ?? n.attrs['sparse_value'];
     if (t is! Tensor)
       throw UnsupportedError('${n.label}: expected tensor-valued Constant');
     return t;
@@ -46,10 +46,6 @@ Tensor _execute(_Node n, List<Tensor?> args) {
     final result = _execute(n, promoted);
     return Tensor.fromValues(x.type, result.shape, result.values);
   }
-  for (final t in args.whereType<Tensor>()) {
-    if (t.type != TensorType.float32)
-      throw UnsupportedError('${n.label} requires FLOAT inputs');
-  }
   switch (n.op) {
     case 'Add':
     case 'Sub':
@@ -77,7 +73,8 @@ Tensor _execute(_Node n, List<Tensor?> args) {
     case 'GlobalAveragePool':
       _require(x.shape.length >= 3, 'Expected N,C,spatial dimensions');
       final plane = _size(x.shape.skip(2));
-      return _float([...x.shape.take(2), ...List.filled(x.shape.length - 2, 1)],
+      return _generate(
+          x.type, [...x.shape.take(2), ...List.filled(x.shape.length - 2, 1)],
           (i) {
         var sum = 0.0;
         for (var j = 0; j < plane; j++) {
@@ -97,7 +94,7 @@ Tensor _execute(_Node n, List<Tensor?> args) {
       }
       final stride = _size(x.shape.skip(2));
       final epsilon = n.real('epsilon', 1e-5);
-      return _float(x.shape, (i) {
+      return _generate(x.type, x.shape, (i) {
         final c = i ~/ stride % channels;
         return (x.values[i] - args[3]!.values[c]) /
                 math.sqrt(args[4]!.values[c] + epsilon) *
@@ -121,7 +118,7 @@ Tensor _execute(_Node n, List<Tensor?> args) {
         'Log' => math.log,
         _ => throw UnsupportedError(n.label),
       };
-      return _float(x.shape, (i) => fn(x.values[i].toDouble()));
+      return _generate(x.type, x.shape, (i) => fn(x.values[i].toDouble()));
   }
 }
 
@@ -165,7 +162,8 @@ class _IndexMap {
 Tensor _binary(String op, Tensor a, Tensor b) {
   final shape = _broadcastShape(a.shape, b.shape);
   final ia = _IndexMap(a.shape, shape), ib = _IndexMap(b.shape, shape);
-  return _float(shape, (i) {
+  _require(a.type == b.type, "Arithmetic operand types differ");
+  return _generate(a.type, shape, (i) {
     final x = a.values[ia.at(i)].toDouble(), y = b.values[ib.at(i)].toDouble();
     return switch (op) {
       'Add' => x + y,
@@ -189,6 +187,38 @@ Tensor _matmul(Tensor a, Tensor b,
   final ia = _IndexMap(ba, batches), ib = _IndexMap(bb, batches);
   final shape = [...batches, if (!av) m, if (!bv) n];
   final biasMap = bias == null ? null : _IndexMap(bias.shape, shape);
+  _require(a.type == b.type, 'Matrix operand types differ');
+  if (a.type != TensorType.float32) {
+    if (!a.type.floating) {
+      final wide = a.type == TensorType.int64 || a.type == TensorType.uint64;
+      final left = wide ? a.bigIntValues : a.values.map(BigInt.from).toList();
+      final right = wide ? b.bigIntValues : b.values.map(BigInt.from).toList();
+      final signed = a.type == TensorType.int32 || a.type == TensorType.int64;
+      final vals = List.generate(_size(shape), (i) {
+        final batch = i ~/ (m * n), r = i ~/ n % m, c = i % n;
+        final ai = ia.at(batch) * m * k + r * k, bi = ib.at(batch) * k * n + c;
+        var sum = BigInt.zero;
+        for (var t = 0; t < k; t++) sum += left[ai + t] * right[bi + t * n];
+        if (alpha != 1 || bias != null)
+          throw UnsupportedError('Scaled integer matrix product');
+        return signed
+            ? sum.toSigned(a.type.bitWidth)
+            : sum.toUnsigned(a.type.bitWidth);
+      });
+      return wide
+          ? Tensor.bigInts(a.type, shape, vals)
+          : Tensor.fromValues(a.type, shape, vals.map((v) => v.toInt()));
+    }
+    return _generate(a.type, shape, (i) {
+      final batch = i ~/ (m * n), r = i ~/ n % m, c = i % n;
+      final ai = ia.at(batch) * m * k + r * k, bi = ib.at(batch) * k * n + c;
+      var sum = 0.0;
+      for (var t = 0; t < k; t++)
+        sum += a.values[ai + t] * b.values[bi + t * n];
+      return alpha * sum +
+          (bias == null || beta == 0 ? 0 : beta * bias.values[biasMap!.at(i)]);
+    });
+  }
   final out = Float32List(_size(shape));
   final left = a.values as Float32List, right = b.values as Float32List;
   final row = Float64List(n);
@@ -217,7 +247,9 @@ Tensor _matmul(Tensor a, Tensor b,
 Tensor _softmax(Tensor x, int axis) {
   final ax = _axis(axis, x.shape.length);
   final width = x.shape[ax], inner = _size(x.shape.skip(ax + 1));
-  final out = Float32List(x.values.length);
+  final List<double> out = x.type == TensorType.float64
+      ? Float64List(x.length)
+      : Float32List(x.length);
   if (out.isNotEmpty) {
     for (var base = 0; base < out.length; base += width * inner) {
       for (var j = 0; j < inner; j++) {
@@ -236,7 +268,9 @@ Tensor _softmax(Tensor x, int axis) {
       }
     }
   }
-  return Tensor._(x.type, x.shape, out.asUnmodifiableView());
+  if (out is Float64List)
+    return Tensor._(x.type, x.shape, out.asUnmodifiableView());
+  return Tensor._(x.type, x.shape, (out as Float32List).asUnmodifiableView());
 }
 
 Tensor _reshape(Tensor x, Tensor pattern, int allowZero) {
@@ -297,17 +331,25 @@ Tensor _concat(List<Tensor> tensors, int axis) {
   }
   final stride = _size(shape.skip(ax + 1));
   final outer = _size(shape.take(ax));
-  Iterable<num> data() sync* {
+  Iterable<T> data<T>(List<T> Function(Tensor) elements) sync* {
     if (_size(shape) == 0) return;
     for (var row = 0; row < outer; row++) {
       for (final t in tensors) {
         final size = t.shape[ax] * stride;
+        final chunk = elements(t);
         for (var i = row * size; i < (row + 1) * size; i++) {
-          yield t.values[i];
+          yield chunk[i];
         }
       }
     }
   }
 
-  return Tensor.fromValues(first.type, shape, data());
+  if (first.type.complex)
+    return Tensor._complex(
+        first.type, shape, List.unmodifiable(data((t) => t.complexValues)));
+  if (first.type == TensorType.string)
+    return Tensor.strings(shape, data((t) => t.stringValues));
+  if (tensors.any((t) => t._wide != null))
+    return Tensor.bigInts(first.type, shape, data((t) => t.bigIntValues));
+  return Tensor.fromValues(first.type, shape, data((t) => t.values));
 }

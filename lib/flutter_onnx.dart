@@ -9,6 +9,8 @@ import 'package:image/image.dart' as img;
 part 'src/tensor.dart';
 part 'src/protobuf.dart';
 part 'src/model.dart';
+part 'src/schemas.dart';
+part 'src/functions.dart';
 part 'src/operators.dart';
 part 'src/spatial.dart';
 part 'src/array_ops.dart';

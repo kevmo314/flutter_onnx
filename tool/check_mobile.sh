@@ -31,8 +31,8 @@ else
 fi
 for ((attempt=0; attempt<90; attempt++)); do
   if result=$(read_marker); then
-    echo "$result" | jq -e '.ok == true and .xorCases == 4 and .attentionOutputs > 0'
     echo "$result"
+    echo "$result" | jq -e '.ok == true and .xorCases == 4 and .attentionOutputs > 0'
     exit 0
   fi
   sleep 2

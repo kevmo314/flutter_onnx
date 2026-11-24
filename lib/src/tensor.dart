@@ -14,6 +14,8 @@ enum TensorType {
   uint32(12, 4),
   uint64(13, 8),
   string(8, 0),
+  complex64(14, 8),
+  complex128(15, 16),
   bfloat16(16, 2),
   float8e4m3fn(17, 1),
   float8e4m3fnuz(18, 1),
@@ -34,6 +36,7 @@ enum TensorType {
         float6e2m3 || float6e3m2 => 6,
         _ => bytesPerElement * 8
       };
+  bool get complex => this == complex64 || this == complex128;
   bool get compact => onnxId >= 17;
   bool get smallInteger =>
       this == int4 || this == uint4 || this == int2 || this == uint2;
@@ -54,21 +57,84 @@ class Tensor implements OnnxValue {
   final List<int> shape;
   final List<num>? _numbers;
   final List<String>? _strings;
+  final List<BigInt>? _wide;
+  final List<(double, double)>? _pairs;
+
+  /// ONNX complex elements in (real, imaginary) order.
+  List<(double, double)> get complexValues =>
+      _pairs ?? (throw StateError('Expected complex tensor'));
+  Tensor._complex(this.type, List<int> dims, this._pairs)
+      : shape = List.unmodifiable(dims),
+        _wide = null,
+        _numbers = null,
+        _strings = null {
+    _require(_size(shape) == length, 'Complex data length differs from shape');
+  }
+  factory Tensor.complex(
+      TensorType type, List<int> shape, Iterable<(double, double)> values) {
+    _require(type.complex, 'Expected COMPLEX64 or COMPLEX128');
+    final tmp = Float32List(2);
+    return Tensor._complex(type, shape, List.unmodifiable(values.map((v) {
+      if (type == TensorType.complex128) return v;
+      tmp[0] = v.$1;
+      tmp[1] = v.$2;
+      return (tmp[0], tmp[1]);
+    })));
+  }
+
+  /// Exact signed or unsigned 64-bit elements on both Dart VM and JavaScript.
+  List<BigInt> get bigIntValues {
+    if (type != TensorType.int64 && type != TensorType.uint64)
+      throw StateError('Expected a 64-bit integer tensor');
+    return _wide ??
+        List<BigInt>.unmodifiable(values.map((n) => BigInt.from(n)));
+  }
+
+  Tensor._wideInts(this.type, List<int> dims, this._wide)
+      : shape = List.unmodifiable(dims),
+        _pairs = null,
+        _strings = null,
+        _numbers = null {
+    _require(_size(shape) == length, 'Integer data length differs from shape');
+  }
+  factory Tensor.bigInts(
+      TensorType type, List<int> shape, Iterable<BigInt> values) {
+    _require(type == TensorType.int64 || type == TensorType.uint64,
+        'Expected INT64 or UINT64');
+    final data = List<BigInt>.unmodifiable(values);
+    final signed = type == TensorType.int64;
+    _require(
+        data.every((v) => (signed ? v.toSigned(64) : v.toUnsigned(64)) == v),
+        'Integer exceeds tensor element range');
+    if (data.every((v) => v.abs() <= BigInt.from(_maxSafe)))
+      return Tensor.fromValues(type, shape, data.map((v) => v.toInt()));
+    return Tensor._wideInts(type, shape, data);
+  }
   List<num> get values =>
-      _numbers ?? (throw StateError('Use stringValues for a STRING tensor'));
+      _numbers ??
+      (throw StateError(type.complex
+          ? 'Use complexValues for a complex tensor'
+          : _wide == null
+              ? 'Use stringValues for a STRING tensor'
+              : 'Use bigIntValues for a wide integer tensor'));
   List<String> get stringValues =>
       _strings ?? (throw StateError('Expected STRING tensor'));
-  int get length => _numbers?.length ?? _strings!.length;
+  int get length =>
+      _numbers?.length ?? _pairs?.length ?? _wide?.length ?? _strings!.length;
   Tensor.strings(List<int> shape, Iterable<String> values)
       : type = TensorType.string,
+        _pairs = null,
         shape = List.unmodifiable(shape),
         _strings = List.unmodifiable(values),
-        _numbers = null {
+        _numbers = null,
+        _wide = null {
     _require(_size(shape) == length, 'String data length differs from shape');
   }
 
   Tensor._(this.type, List<int> shape, this._numbers)
       : _strings = null,
+        _pairs = null,
+        _wide = null,
         shape = List.unmodifiable(shape) {
     if (_size(shape) != values.length) {
       throw ArgumentError(
@@ -150,6 +216,30 @@ class Tensor implements OnnxValue {
     if (type == TensorType.string)
       throw UnsupportedError('STRING uses ONNX string_data');
     if (type.compact) return _encodeCompact(this);
+    if (type.complex) {
+      final out = ByteData(length * type.bytesPerElement);
+      final narrow = type == TensorType.complex64;
+      for (var i = 0; i < length; i++) {
+        final p = i * type.bytesPerElement, value = complexValues[i];
+        if (narrow) {
+          out.setFloat32(p, value.$1, Endian.little);
+          out.setFloat32(p + 4, value.$2, Endian.little);
+        } else {
+          out.setFloat64(p, value.$1, Endian.little);
+          out.setFloat64(p + 8, value.$2, Endian.little);
+        }
+      }
+      return out.buffer.asUint8List();
+    }
+    if (_wide != null) {
+      final out = ByteData(length * 8);
+      for (var i = 0; i < length; i++) {
+        final b = _wide[i].toUnsigned(64);
+        out.setUint32(i * 8, b.toUnsigned(32).toInt(), Endian.little);
+        out.setUint32(i * 8 + 4, (b >> 32).toInt(), Endian.little);
+      }
+      return out.buffer.asUint8List();
+    }
 
     if (values is TypedData &&
         type != TensorType.float16 &&
@@ -194,9 +284,13 @@ class Tensor implements OnnxValue {
     return out.buffer.asUint8List();
   }
 
-  Tensor _reshape(List<int> dims) => type == TensorType.string
-      ? Tensor.strings(dims, stringValues)
-      : Tensor._(type, dims, values);
+  Tensor _reshape(List<int> dims) => type.complex
+      ? Tensor._complex(type, dims, _pairs)
+      : type == TensorType.string
+          ? Tensor.strings(dims, stringValues)
+          : _wide != null
+              ? Tensor._wideInts(type, dims, _wide)
+              : Tensor._(type, dims, values);
 }
 
 const _maxSafe = 9007199254740991;
@@ -223,6 +317,15 @@ Tensor _float(List<int> shape, double Function(int) value) {
 }
 
 Tensor _reorder(Tensor x, List<int> shape, int Function(int) offset) {
+  if (x.type.complex)
+    return Tensor._complex(
+        x.type,
+        shape,
+        List.unmodifiable(
+            List.generate(_size(shape), (i) => x.complexValues[offset(i)])));
+  if (x._wide != null)
+    return Tensor.bigInts(
+        x.type, shape, List.generate(_size(shape), (i) => x._wide[offset(i)]));
   if (x.type == TensorType.string)
     return Tensor.strings(
         shape, List.generate(_size(shape), (i) => x.stringValues[offset(i)]));
@@ -272,6 +375,24 @@ Tensor _decodeRaw(TensorType type, List<int> shape, Uint8List bytes,
   }
   if (bytes.length != count * width)
     throw const FormatException('Incorrect raw_data length');
+  if (type.complex) {
+    final narrow = type == TensorType.complex64;
+    return Tensor._complex(
+        type,
+        shape,
+        List.unmodifiable(List.generate(count, (i) {
+          final p = i * width;
+          return narrow
+              ? (
+                  d.getFloat32(p, Endian.little),
+                  d.getFloat32(p + 4, Endian.little)
+                )
+              : (
+                  d.getFloat64(p, Endian.little),
+                  d.getFloat64(p + 8, Endian.little)
+                );
+        })));
+  }
   if (type == TensorType.float32)
     return _float(shape, (i) => d.getFloat32(i * 4, Endian.little));
   if (type == TensorType.uint8)
@@ -284,19 +405,23 @@ Tensor _decodeRaw(TensorType type, List<int> shape, Uint8List bytes,
     }
     return Tensor._(type, shape, buf.asUnmodifiableView());
   }
+  if (type == TensorType.int64 || type == TensorType.uint64) {
+    final numbers = List.generate(count, (i) {
+      final p = i * 8;
+      final hi = type == TensorType.int64
+          ? d.getInt32(p + 4, Endian.little)
+          : d.getUint32(p + 4, Endian.little);
+      final value =
+          (BigInt.from(hi) << 32) | BigInt.from(d.getUint32(p, Endian.little));
+      if (sliceBound && value.abs() > BigInt.from(_maxSafe))
+        return BigInt.from(value.sign * _maxSafe);
+      return value;
+    });
+    return Tensor.bigInts(type, shape, numbers);
+  }
   num read(int i) {
     final p = i * width;
     switch (type) {
-      case TensorType.int64:
-      case TensorType.uint64:
-        final hi = type == TensorType.int64
-            ? d.getInt32(p + 4, Endian.little)
-            : d.getUint32(p + 4, Endian.little);
-        final v = (BigInt.from(hi) << 32) +
-            BigInt.from(d.getUint32(p, Endian.little));
-        if (sliceBound && v.abs() > BigInt.from(_maxSafe))
-          return v.sign * _maxSafe;
-        return _portableInt(v);
       case TensorType.float64:
         return d.getFloat64(p, Endian.little);
       case TensorType.int32:

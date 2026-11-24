@@ -45,6 +45,8 @@ List<OnnxValue> _valueNode(
         .toList();
   }
 
+  final function = n.function;
+  if (function != null) return function.run(args);
   switch (n.op) {
     case 'Identity':
       return [args.first!];

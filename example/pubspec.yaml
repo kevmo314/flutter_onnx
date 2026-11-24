@@ -10,6 +10,7 @@ dependencies:
   flutter_onnx_accelerators:
     path: ../accelerators
 dev_dependencies:
+  http: ^1.3.0
   flutter_test:
     sdk: flutter
   integration_test:

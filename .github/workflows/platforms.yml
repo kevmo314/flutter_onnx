@@ -1,5 +1,7 @@
 name: Platform inference
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
+env:
+  FULL_MODELS: ${{ github.event_name == 'workflow_dispatch' }}
 permissions:
   contents: read
 jobs:
@@ -41,9 +43,15 @@ jobs:
         with:
           flutter-version: '3.38.9'
           cache: true
+      - uses: actions/setup-python@v5
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          python-version: '3.12'
+      - if: github.event_name == 'workflow_dispatch'
+        run: python -m pip install onnx==1.23.2 onnxruntime==1.32.0 numpy
       - run: flutter pub get
         working-directory: example
-      - run: flutter build apk --debug --target integration_test/platform_check.dart
+      - run: flutter build apk --debug --dart-define=VERIFY_LARGE_MODELS=$FULL_MODELS --target integration_test/platform_check.dart
         working-directory: example
       - name: Enable KVM
         run: |
@@ -54,8 +62,11 @@ jobs:
         with:
           api-level: 35
           arch: x86_64
+          ram-size: 4096M
           working-directory: example
-          script: bash ../tool/check_mobile.sh android
+          script: |
+            bash ../tool/check_mobile.sh android
+            if [ "$FULL_MODELS" = "true" ]; then cd .. && python tool/verify_models.py --cache "$RUNNER_TEMP/models" --device android qwen_q4; fi
   ios:
     runs-on: macos-15
     timeout-minutes: 40
@@ -65,6 +76,12 @@ jobs:
         with:
           flutter-version: '3.38.9'
           cache: true
+      - uses: actions/setup-python@v5
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          python-version: '3.12'
+      - if: github.event_name == 'workflow_dispatch'
+        run: python -m pip install onnx==1.23.2 onnxruntime==1.32.0 numpy
       - name: Run inference on an iPhone simulator
         working-directory: example
         run: |
@@ -72,5 +89,9 @@ jobs:
           xcrun simctl boot "$simulator"
           xcrun simctl bootstatus "$simulator" -b
           flutter pub get
-          flutter build ios --simulator --debug --target integration_test/platform_check.dart
+          flutter build ios --simulator --debug --dart-define=VERIFY_LARGE_MODELS=$FULL_MODELS --target integration_test/platform_check.dart
           bash ../tool/check_mobile.sh ios "$simulator"
+          if [ "$FULL_MODELS" = "true" ]; then
+            cd ..
+            python tool/verify_models.py --cache "$RUNNER_TEMP/models" --device "$simulator" qwen_q4
+          fi

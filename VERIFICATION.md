@@ -2,7 +2,7 @@
 
 ## Full-model comparisons
 
-The independent oracle is Python ONNX Runtime 1.32.0 on CPU. The comparison runs unmodified exports with pinned revisions and verifies every output's name, element type, dimensions and values. Each classifier also checks the predicted class on a seeded random 224 × 224 RGB input. The test downloads model weights into a local cache and verifies their SHA-256 hashes. The repository contains only the small XOR example.
+The independent oracle is Python ONNX Runtime 1.32.0 on CPU. The comparison runs unmodified exports with pinned revisions and verifies every output's name, element type, dimensions and values. Each classifier also checks the predicted class on a seeded random 224 × 224 RGB input. The test downloads model weights into a local cache and verifies their SHA-256 hashes. The example bundles small XOR and cached-attention fixtures.
 
 | Model | Export | Maximum absolute difference |
 | --- | --- | ---: |
@@ -15,11 +15,13 @@ The independent oracle is Python ONNX Runtime 1.32.0 on CPU. The comparison runs
 | Qwen2.5-0.5B-Instruct | FP32, opset 14 | 0.000182 |
 | Qwen2.5-0.5B-Instruct | Four-bit block weights, opset 14 | 0.0000482 |
 
-The Qwen test prefills three prompt tokens into an empty cache, then runs two one-token decode steps. Each engine feeds its own 48 cache tensors back into its next step. The test asserts elementwise agreement on all 49 outputs per step (logits and every key/value tensor) and exact greedy-token agreement at every position. Relative tolerance is 0.0001. Absolute tolerance is 0.0005 for Qwen and 0.0001 for the vision models. These observations apply to the named model revisions, sample inputs and the Dart VM CPU path. Tokenization, chat templates, long-context accuracy and throughput are outside this comparison.
+The Qwen test prefills three prompt tokens into an empty cache, then runs two one-token decode steps. Each engine feeds its own 48 cache tensors back into its next step. The test asserts elementwise agreement on all 49 outputs per step (logits and every key/value tensor) and exact greedy-token agreement at every position. Relative tolerance is 0.0001. Absolute tolerance is 0.0005 for Qwen and 0.0001 for the vision models. All eight exports were evaluated on the Dart VM CPU path. The same three-step Qwen four-bit test also passed in Chromium using Dart compiled to JavaScript, with maximum absolute error 0.0000482. Tokenization, chat templates, long-context accuracy and throughput are outside this comparison.
 
 ## Operator coverage
 
-Run the official ONNX 1.23.2 standard-domain node fixtures through the Dart engine to audit opset 28. The harness counts unexpanded single-node cases, checks each staged model with the ONNX checker and compares outputs at the tolerances specified by the upstream case. It reports unrepresentable inputs, unavailable conversions and mismatches as failures. Operators with no qualifying upstream case remain unverified. Passing every included case for an operator is a lower bound on testing, not proof of every type, attribute or edge case.
+Run the official ONNX 1.23.2 standard-domain node fixtures through the Dart engine to audit opset 28. The harness counts unexpanded single-node cases, checks each staged model with the ONNX checker and compares outputs at the tolerances specified by the upstream case. It reports unrepresentable inputs, unavailable conversions and mismatches as failures. The latest recorded audit passed **1,357 of 1,378 cases**. Of the 203 operator names, 181 passed every available upstream case and 14 have no qualifying single-node case. Separate Dart VM and browser tests exercise all 14, including sequences, optionals, ROI pooling and seeded distributions. Passing every included case for an operator is a lower bound on testing, not proof of every type, attribute or edge case.
+
+The 21 outstanding cases cover seven exact-sample comparisons for Bernoulli and training Dropout, five image decoder cases, two inverse DFT precision comparisons, six control-flow or sequence fixtures, and one MeanVarianceNormalization graph rejected by the upstream checker. Separate stochastic tests use 12,000 draws to check distribution moments, seeded replay, stream advancement and Dropout mask scaling.
 
 [Per-operator results](tool/conformance.tsv) · [Passing-case regression baseline](tool/conformance-baseline.txt)
 
@@ -34,6 +36,7 @@ python tool/verify_randomized.py
 python tool/opset_conformance.py --baseline tool/conformance-baseline.txt --report report.json
 python tool/verify_models.py --cache /tmp/onnx-models squeezenet1_1 mobilenetv2_050 resnet18 efficientnet_b0 densenet121 mobilenetv3_small_050
 python tool/verify_models.py --cache /tmp/onnx-models qwen qwen_q4
+python tool/verify_models.py --cache /tmp/onnx-models --browser chromium qwen_q4
 ```
 
-`python tool/opset_conformance.py --strict` requires every catalogued operator to have test coverage and every case to pass. The package has not reached that threshold. GitHub Actions runs the Dart VM, browser, WebGPU, Android emulator and iPhone simulator checks. A physical Android accelerator and a physical iPhone are separate verification targets.
+`python tool/opset_conformance.py --strict` requires every catalogued operator to have test coverage and every case to pass. The package has not reached that threshold. GitHub Actions runs the Dart VM, browser, WebGPU, Android emulator and iPhone simulator checks. Manually dispatch the Platform inference workflow to run the full four-bit Qwen comparison on both mobile simulators. The default push checks use the cached-attention and XOR fixtures. Physical mobile hardware remains a separate verification target.

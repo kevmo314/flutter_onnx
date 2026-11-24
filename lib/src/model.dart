@@ -78,7 +78,9 @@ class OnnxSession {
   OnnxSession._(this.opset, this.inputs, this.outputs, this._weights,
       this._nodes, this._uses, this._captures);
 
-  factory OnnxSession.fromBytes(Uint8List bytes) {
+  /// Supply external weight files by their exact ONNX location.
+  factory OnnxSession.fromBytes(Uint8List bytes,
+      {Map<String, Uint8List> externalData = const {}}) {
     try {
       final model = _Proto(bytes);
       final ir = model.integer(1);
@@ -91,16 +93,19 @@ class OnnxSession {
       final version = imports.single.integer(2);
       if (version < 13 || version > 28)
         throw UnsupportedError('ONNX opset $version (supported: 13–28)');
-      if (model.has(25)) throw UnsupportedError('Model-local functions');
-      return OnnxSession._readGraph(model.message(7), version);
+      final functions = _FunctionScope.fromModel(model);
+      return OnnxSession._readGraph(model.message(7), version,
+          externalData: externalData, functions: functions);
     } on TypeError catch (e) {
       throw FormatException('Invalid ONNX protobuf field: $e');
     }
   }
   factory OnnxSession._readGraph(_Proto graph, int version,
-      {bool allowCapture = false}) {
+      {bool allowCapture = false,
+      _FunctionScope functions = const _FunctionScope(),
+      Map<String, Uint8List> externalData = const {}}) {
     final captures = <String>{};
-    if (graph.has(15)) throw UnsupportedError('Sparse initializers');
+
     Map<String, TensorInfo> interface(int field) {
       final result = <String, TensorInfo>{};
       for (final value in graph.messages(field)) {
@@ -114,7 +119,10 @@ class OnnxSession {
 
     final inputs = interface(11);
     final outputs = interface(12);
-    final nodes = graph.messages(1).map((p) => _Node.read(p, version)).toList();
+    final nodes = graph
+        .messages(1)
+        .map((p) => _Node.read(p, version, externalData, functions))
+        .toList();
     final sliceBounds = <String>{};
     final otherUses = {...inputs.keys, ...outputs.keys};
     for (final n in nodes) {
@@ -132,7 +140,14 @@ class OnnxSession {
       final name = t.string(8);
       if (name.isEmpty || weights.containsKey(name))
         throw FormatException('Invalid initializer name "$name"');
-      weights[name] = _tensor(t, sliceBound: sliceBounds.contains(name));
+      weights[name] = _tensor(t,
+          externalData: externalData, sliceBound: sliceBounds.contains(name));
+    }
+    for (final sparse in graph.messages(15)) {
+      final name = sparse.message(1).string(8);
+      if (name.isEmpty || weights.containsKey(name))
+        throw FormatException('Invalid sparse initializer name "$name"');
+      weights[name] = _sparseTensor(sparse, externalData);
     }
     final known = {...inputs.keys, ...weights.keys};
     final uses = <String, int>{};
@@ -303,7 +318,9 @@ class _Node {
   final List<String> inputs;
   final Map<String, Object> attrs;
   late final math.Random random = math.Random((attrs["seed"] as num?)?.toInt());
-  _Node(this.op, this.label, this.outputs, this.inputs, this.attrs);
+  final _FunctionCall? function;
+  _Node(this.op, this.label, this.outputs, this.inputs, this.attrs,
+      [this.function]);
 
   Iterable<String> get references sync* {
     yield* inputs.where((s) => s.isNotEmpty);
@@ -312,54 +329,29 @@ class _Node {
     }
   }
 
-  factory _Node.read(_Proto p, int opset) {
+  factory _Node.read(_Proto p, int opset, Map<String, Uint8List> externalData,
+      _FunctionScope functions) {
     final domain = p.string(7);
     final op = domain.isEmpty ? p.string(4) : '$domain::${p.string(4)}';
     final name = p.string(3);
     final label = name.isEmpty ? op : '$name ($op)';
-    final schema = _schemas[op];
+    final call = functions.resolve(p, opset, externalData);
+    if (call != null)
+      return _Node(op, label, p.strings(2), p.strings(1), {}, call);
+    final history = _schemas[op];
+    final schema = op == 'com.microsoft::MatMulNBits'
+        ? _matMulNBitsSchema
+        : history?.entries.where((e) => e.key <= opset).lastOrNull?.value;
     if (schema == null)
-      throw UnsupportedError('$label: unsupported operator domain or type');
-    final outs = p.strings(2);
-    if (outs.isEmpty ||
-        (outs.first.isEmpty && !const {'RNN', 'GRU', 'LSTM'}.contains(op)) ||
-        (!const {
-              'Attention',
-              'RMSNormalization',
-              'LayerNormalization',
-              'Split',
-              'TopK',
-              'Dropout',
-              'CausalConvWithState',
-              'LinearAttention',
-              'DynamicQuantizeLinear',
-              'RNN',
-              'GRU',
-              'LSTM',
-              'SoftmaxCrossEntropyLoss',
-              'StringSplit',
-              'Unique',
-              'BatchNormalization',
-              'MaxPool',
-              'If',
-              'Loop',
-              'Scan',
-              'SequenceMap'
-            }.contains(op) &&
-            outs.skip(1).any((s) => s.isNotEmpty)))
-      throw UnsupportedError('$label: requires one output');
-    final ins = p.strings(1);
-    if (ins.length < schema.$1 ||
-        ins.length > schema.$2 ||
-        ins.take(schema.$1).contains('')) {
-      throw FormatException('$label: invalid input list');
-    }
+      throw UnsupportedError('$label: unsupported operator at opset $opset');
+    final outs = p.strings(2), ins = p.strings(1);
+    schema.check(ins, outs, label);
     final attrs = <String, Object>{};
-    for (final a in p.messages(5)) {
-      final key = a.string(1);
-      final kind = schema.$3[key];
-      if (kind == null ||
-          (opset < 14 && (key == 'allowzero' || key == 'training_mode'))) {
+    for (final entry in p.messages(5)) {
+      final key = entry.string(1);
+      final a = functions.bind(entry);
+      final kind = schema.attributes[key];
+      if (kind == null) {
         throw UnsupportedError(
             '$label: unsupported attribute $key at opset $opset');
       }
@@ -369,8 +361,12 @@ class _Node {
         1 => ByteData.sublistView(a.bytes(2)).getFloat32(0, Endian.little),
         2 => a.integer(3),
         3 => a.string(4),
-        4 => _tensor(a.message(5)),
-        5 => OnnxSession._readGraph(a.message(6), opset, allowCapture: true),
+        4 => _tensor(a.message(5), externalData: externalData),
+        5 => OnnxSession._readGraph(a.message(6), opset,
+            allowCapture: true,
+            externalData: externalData,
+            functions: functions),
+        11 => _sparseTensor(a.message(22), externalData),
         13 => TensorInfo._type(key, a.message(14)),
         6 => [
             for (final field in a.all(7))
@@ -382,6 +378,10 @@ class _Node {
         _ => throw UnsupportedError('$label: attribute $key'),
       };
     }
+    for (final required in schema.requiredAttributes) {
+      if (!attrs.containsKey(required))
+        throw FormatException('$label: missing attribute $required');
+    }
     return _Node(op, label, outs, ins, attrs);
   }
   int integer(String name, int fallback) => attrs[name] as int? ?? fallback;
@@ -390,493 +390,36 @@ class _Node {
   List<int>? ints(String name) => attrs[name] as List<int>?;
 }
 
-// (required input count, maximum input count, AttributeProto types).
-const _schemas = <String, (int, int, Map<String, int>)>{
-  'Attention': (
-    3,
-    7,
-    {
-      'q_num_heads': 2,
-      'kv_num_heads': 2,
-      'is_causal': 2,
-      'scale': 1,
-      'softcap': 1,
-      'softmax_precision': 2,
-      'qk_matmul_output_mode': 2,
-      'left_window_size': 2,
-      'right_window_size': 2
+class _Schema {
+  final int minInputs, maxInputs, minOutputs, maxOutputs;
+  final String inputs, outputs;
+  final Map<String, int> attributes;
+  final List<String> requiredAttributes;
+  const _Schema(this.minInputs, this.maxInputs, this.inputs, this.minOutputs,
+      this.maxOutputs, this.outputs, this.attributes, this.requiredAttributes);
+
+  void check(List<String> ins, List<String> outs, String label) {
+    void checkSlots(
+        List<String> names, String slots, int min, int max, String role) {
+      if (names.length < min || names.length > max)
+        throw FormatException('$label: invalid number of $role');
+      for (var i = 0; i < names.length; i++) {
+        if (names[i].isEmpty && (i >= slots.length || slots[i] != '?'))
+          throw FormatException('$label: missing $role at $i');
+      }
     }
-  ),
-  'RMSNormalization': (2, 2, {'axis': 2, 'epsilon': 1, 'stash_type': 2}),
-  'LayerNormalization': (2, 3, {'axis': 2, 'epsilon': 1, 'stash_type': 2}),
-  'RotaryEmbedding': (
-    3,
-    4,
-    {'num_heads': 2, 'rotary_embedding_dim': 2, 'interleaved': 2}
-  ),
-  'Gelu': (1, 1, {'approximate': 3}),
-  'Erf': (1, 1, {}),
-  'SwiGLU': (2, 2, {'alpha': 1}),
-  'Split': (1, 2, {'axis': 2, 'num_outputs': 2}),
-  'ArgMax': (1, 1, {'axis': 2, 'keepdims': 2, 'select_last_index': 2}),
-  'ArgMin': (1, 1, {'axis': 2, 'keepdims': 2, 'select_last_index': 2}),
-  'TopK': (2, 2, {'axis': 2, 'largest': 2, 'sorted': 2}),
-  'Dropout': (1, 3, {'seed': 2}),
-  'com.microsoft::MatMulNBits': (
+
+    checkSlots(ins, inputs, minInputs, maxInputs, 'inputs');
+    checkSlots(outs, outputs, minOutputs, maxOutputs, 'outputs');
+  }
+}
+
+const _matMulNBitsSchema = _Schema(
     3,
     4,
-    {'K': 2, 'N': 2, 'bits': 2, 'block_size': 2, 'accuracy_level': 2}
-  ),
-  'CastLike': (2, 2, {'saturate': 2, 'round_mode': 3}),
-  'BitCast': (1, 1, {'to': 2}),
-  'BitwiseNot': (1, 1, {}),
-  'BitShift': (2, 2, {'direction': 3}),
-  'BitwiseAnd': (2, 2, {}),
-  'BitwiseOr': (2, 2, {}),
-  'BitwiseXor': (2, 2, {}),
-  'Mod': (2, 2, {'fmod': 2}),
-  'IsInf': (1, 1, {'detect_negative': 2, 'detect_positive': 2}),
-  'CumSum': (2, 2, {'exclusive': 2, 'reverse': 2}),
-  'CumProd': (2, 2, {'exclusive': 2, 'reverse': 2}),
-  'EyeLike': (1, 1, {'dtype': 2, 'k': 2}),
-  'GatherND': (2, 2, {'batch_dims': 2}),
-  'Compress': (2, 2, {'axis': 2}),
-  'NonZero': (1, 1, {}),
-  'OneHot': (3, 3, {'axis': 2}),
-  'ReverseSequence': (2, 2, {'time_axis': 2, 'batch_axis': 2}),
-  'DepthToSpace': (1, 1, {'blocksize': 2, 'mode': 3}),
-  'SpaceToDepth': (1, 1, {'blocksize': 2, 'mode': 3}),
-  'Pad': (2, 4, {'mode': 3}),
-  'CenterCropPad': (2, 2, {'axes': 7}),
-  'Scatter': (3, 3, {'axis': 2, 'reduction': 3}),
-  'ScatterElements': (3, 3, {'axis': 2, 'reduction': 3}),
-  'HannWindow': (1, 1, {'periodic': 2, 'output_datatype': 2}),
-  'HammingWindow': (1, 1, {'periodic': 2, 'output_datatype': 2}),
-  'BlackmanWindow': (1, 1, {'periodic': 2, 'output_datatype': 2}),
-  'Shrink': (1, 1, {'bias': 1, 'lambd': 1}),
-  'Hardmax': (1, 1, {'axis': 2}),
-  'GlobalMaxPool': (1, 1, {}),
-  'GlobalLpPool': (1, 1, {'axis': 2, 'p': 2}),
-  'LpNormalization': (1, 1, {'axis': 2, 'p': 2}),
-  'InstanceNormalization': (3, 3, {'epsilon': 1}),
-  'GroupNormalization': (
-    3,
-    3,
-    {'num_groups': 2, 'epsilon': 1, 'stash_type': 2}
-  ),
-  'MeanVarianceNormalization': (1, 1, {'axes': 7}),
-  'LRN': (1, 1, {'alpha': 1, 'beta': 1, 'bias': 1, 'size': 2}),
-  'Det': (1, 1, {}),
-  'MatMulInteger': (2, 4, {}),
-  'QLinearMatMul': (8, 8, {}),
-  'QuantizeLinear': (
-    2,
-    3,
-    {
-      'axis': 2,
-      'saturate': 2,
-      'block_size': 2,
-      'output_dtype': 2,
-      'precision': 2
-    }
-  ),
-  'DequantizeLinear': (
-    2,
-    3,
-    {
-      'axis': 2,
-      'saturate': 2,
-      'block_size': 2,
-      'output_dtype': 2,
-      'precision': 2
-    }
-  ),
-  'DynamicQuantizeLinear': (1, 1, {}),
-  'CausalConvWithState': (2, 4, {'activation': 3}),
-  'LinearAttention': (
-    3,
-    6,
-    {
-      'q_num_heads': 2,
-      'kv_num_heads': 2,
-      'scale': 1,
-      'chunk_size': 2,
-      'update_rule': 3
-    }
-  ),
-  'NegativeLogLikelihoodLoss': (2, 3, {'ignore_index': 2, 'reduction': 3}),
-  'SoftmaxCrossEntropyLoss': (2, 3, {'ignore_index': 2, 'reduction': 3}),
-  'TensorScatter': (2, 3, {'mode': 3, 'axis': 2}),
-  'Mish': (1, 1, {}),
-  'NonMaxSuppression': (2, 5, {'center_point_box': 2}),
-  'Unique': (1, 1, {'axis': 2, 'sorted': 2}),
-  'StringConcat': (2, 2, {}),
-  'StringSplit': (1, 1, {'delimiter': 3, 'maxsplit': 2}),
-  'RegexFullMatch': (1, 1, {'pattern': 3}),
-  'StringNormalizer': (
+    '111?',
     1,
     1,
-    {
-      'case_change_action': 3,
-      'is_case_sensitive': 2,
-      'locale': 3,
-      'stopwords': 8
-    }
-  ),
-  'RNN': (
-    3,
-    8,
-    {
-      'clip': 1,
-      'activation_alpha': 6,
-      'activation_beta': 6,
-      'activations': 8,
-      'hidden_size': 2,
-      'input_forget': 2,
-      'linear_before_reset': 2,
-      'layout': 2,
-      'direction': 3
-    }
-  ),
-  'GRU': (
-    3,
-    8,
-    {
-      'clip': 1,
-      'activation_alpha': 6,
-      'activation_beta': 6,
-      'activations': 8,
-      'hidden_size': 2,
-      'input_forget': 2,
-      'linear_before_reset': 2,
-      'layout': 2,
-      'direction': 3
-    }
-  ),
-  'LSTM': (
-    3,
-    8,
-    {
-      'clip': 1,
-      'activation_alpha': 6,
-      'activation_beta': 6,
-      'activations': 8,
-      'hidden_size': 2,
-      'input_forget': 2,
-      'linear_before_reset': 2,
-      'layout': 2,
-      'direction': 3
-    }
-  ),
-  'If': (1, 1, {'then_branch': 5, 'else_branch': 5}),
-  'Loop': (0, 2147483647, {'body': 5}),
-  'Scan': (
-    1,
-    2147483647,
-    {
-      'body': 5,
-      'num_scan_inputs': 2,
-      'scan_input_axes': 7,
-      'scan_output_axes': 7,
-      'scan_input_directions': 7,
-      'scan_output_directions': 7
-    }
-  ),
-  'SequenceMap': (1, 2147483647, {'body': 5}),
-  'SequenceConstruct': (1, 2147483647, {}),
-  'SequenceLength': (1, 1, {}),
-  'SequenceAt': (2, 2, {}),
-  'SequenceErase': (1, 2, {}),
-  'SequenceInsert': (2, 3, {}),
-  'SequenceEmpty': (0, 0, {'dtype': 2}),
-  'SplitToSequence': (1, 2, {'axis': 2, 'keepdims': 2}),
-  'ConcatFromSequence': (1, 1, {'axis': 2, 'new_axis': 2}),
-  'Optional': (0, 1, {'type': 13}),
-  'OptionalHasElement': (0, 1, {}),
-  'OptionalGetElement': (1, 1, {}),
-  'AffineGrid': (2, 2, {'align_corners': 2}),
-  'GridSample': (2, 2, {'align_corners': 2, 'padding_mode': 3, 'mode': 3}),
-  'Resize': (
-    1,
-    4,
-    {
-      'keep_aspect_ratio_policy': 3,
-      'axes': 7,
-      'antialias': 2,
-      'extrapolation_value': 1,
-      'exclude_outside': 2,
-      'nearest_mode': 3,
-      'coordinate_transformation_mode': 3,
-      'cubic_coeff_a': 1,
-      'mode': 3
-    }
-  ),
-  'Upsample': (2, 2, {'mode': 3}),
-  'RoiAlign': (
-    3,
-    3,
-    {
-      'coordinate_transformation_mode': 3,
-      'mode': 3,
-      'output_height': 2,
-      'output_width': 2,
-      'sampling_ratio': 2,
-      'spatial_scale': 1
-    }
-  ),
-  'MaxRoiPool': (2, 2, {'pooled_shape': 7, 'spatial_scale': 1}),
-  'Einsum': (1, 2147483647, {'equation': 3}),
-  'DFT': (1, 3, {'inverse': 2, 'onesided': 2, 'axis': 2}),
-  'STFT': (2, 4, {'onesided': 2}),
-  'MelWeightMatrix': (5, 5, {'output_datatype': 2}),
-  'RandomNormal': (
-    0,
-    0,
-    {'mean': 1, 'scale': 1, 'seed': 1, 'shape': 7, 'dtype': 2}
-  ),
-  'RandomNormalLike': (1, 1, {'mean': 1, 'scale': 1, 'seed': 1, 'dtype': 2}),
-  'RandomUniform': (
-    0,
-    0,
-    {'high': 1, 'low': 1, 'seed': 1, 'shape': 7, 'dtype': 2}
-  ),
-  'RandomUniformLike': (1, 1, {'high': 1, 'low': 1, 'seed': 1, 'dtype': 2}),
-  'Multinomial': (1, 1, {'dtype': 2, 'sample_size': 2, 'seed': 1}),
-  'Bernoulli': (1, 1, {'dtype': 2, 'seed': 1}),
-  'TfIdfVectorizer': (
-    1,
-    1,
-    {
-      'mode': 3,
-      'ngram_indexes': 7,
-      'ngram_counts': 7,
-      'weights': 6,
-      'pool_int64s': 7,
-      'pool_strings': 8,
-      'min_gram_length': 2,
-      'max_gram_length': 2,
-      'max_skip_count': 2
-    }
-  ),
-  'ImageDecoder': (1, 1, {'pixel_format': 3}),
-  'Col2Im': (3, 3, {'strides': 7, 'pads': 7, 'dilations': 7}),
-  'MaxUnpool': (2, 3, {'pads': 7, 'strides': 7, 'kernel_shape': 7}),
-  'LpPool': (
-    1,
-    1,
-    {
-      'p': 2,
-      'auto_pad': 3,
-      'kernel_shape': 7,
-      'pads': 7,
-      'strides': 7,
-      'dilations': 7,
-      'ceil_mode': 2
-    }
-  ),
-  'ConvTranspose': (
-    2,
-    3,
-    {
-      'group': 2,
-      'auto_pad': 3,
-      'kernel_shape': 7,
-      'pads': 7,
-      'strides': 7,
-      'dilations': 7,
-      'output_shape': 7,
-      'output_padding': 7
-    }
-  ),
-  'DeformConv': (
-    3,
-    5,
-    {
-      'group': 2,
-      'auto_pad': 3,
-      'kernel_shape': 7,
-      'pads': 7,
-      'strides': 7,
-      'dilations': 7,
-      'offset_group': 2
-    }
-  ),
-  'ConvInteger': (
-    2,
-    4,
-    {
-      'group': 2,
-      'auto_pad': 3,
-      'kernel_shape': 7,
-      'pads': 7,
-      'strides': 7,
-      'dilations': 7
-    }
-  ),
-  'QLinearConv': (
-    8,
-    9,
-    {
-      'group': 2,
-      'auto_pad': 3,
-      'kernel_shape': 7,
-      'pads': 7,
-      'strides': 7,
-      'dilations': 7
-    }
-  ),
-  'Clip': (1, 3, {}),
-  'HardSigmoid': (1, 1, {'alpha': 1, 'beta': 1}),
-  'HardSwish': (1, 1, {}),
-  'Reciprocal': (1, 1, {}),
-  'Floor': (1, 1, {}),
-  'Ceil': (1, 1, {}),
-  'Round': (1, 1, {}),
-  'Cos': (1, 1, {}),
-  'Sin': (1, 1, {}),
-  'Tan': (1, 1, {}),
-  'Acos': (1, 1, {}),
-  'Asin': (1, 1, {}),
-  'Atan': (1, 1, {}),
-  'Cosh': (1, 1, {}),
-  'Sinh': (1, 1, {}),
-  'Acosh': (1, 1, {}),
-  'Asinh': (1, 1, {}),
-  'Atanh': (1, 1, {}),
-  'Sign': (1, 1, {}),
-  'Softsign': (1, 1, {}),
-  'Softplus': (1, 1, {}),
-  'IsNaN': (1, 1, {}),
-  'Not': (1, 1, {}),
-  'Elu': (1, 1, {'alpha': 1}),
-  'Celu': (1, 1, {'alpha': 1}),
-  'ThresholdedRelu': (1, 1, {'alpha': 1}),
-  'Swish': (1, 1, {'alpha': 1}),
-  'Selu': (1, 1, {'alpha': 1, 'gamma': 1}),
-  'Pow': (2, 2, {}),
-  'Equal': (2, 2, {}),
-  'Greater': (2, 2, {}),
-  'GreaterOrEqual': (2, 2, {}),
-  'Less': (2, 2, {}),
-  'LessOrEqual': (2, 2, {}),
-  'And': (2, 2, {}),
-  'Or': (2, 2, {}),
-  'Xor': (2, 2, {}),
-  'PRelu': (2, 2, {}),
-  'Sum': (1, 2147483647, {}),
-  'Mean': (1, 2147483647, {}),
-  'Min': (1, 2147483647, {}),
-  'Max': (1, 2147483647, {}),
-  'Shape': (1, 1, {'start': 2, 'end': 2}),
-  'Size': (1, 1, {}),
-  'Gather': (2, 2, {'axis': 2}),
-  'GatherElements': (2, 2, {'axis': 2}),
-  'Expand': (2, 2, {}),
-  'Tile': (2, 2, {}),
-  'Where': (3, 3, {}),
-  'Range': (3, 3, {}),
-  'Squeeze': (1, 2, {}),
-  'Unsqueeze': (2, 2, {}),
-  'Cast': (1, 1, {'to': 2, 'saturate': 2, 'round_mode': 3}),
-  'ConstantOfShape': (1, 1, {'value': 4}),
-  'ScatterND': (3, 3, {'reduction': 3}),
-  'Slice': (3, 5, {}),
-  'Trilu': (1, 2, {'upper': 2}),
-  'ReduceMean': (1, 2, {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}),
-  'ReduceSum': (1, 2, {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}),
-  'ReduceMax': (1, 2, {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}),
-  'ReduceMin': (1, 2, {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}),
-  'ReduceProd': (1, 2, {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}),
-  'ReduceL1': (1, 2, {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}),
-  'ReduceL2': (1, 2, {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}),
-  'ReduceLogSum': (1, 2, {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}),
-  'ReduceLogSumExp': (
-    1,
-    2,
-    {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}
-  ),
-  'ReduceSumSquare': (
-    1,
-    2,
-    {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}
-  ),
-  'LogSoftmax': (1, 1, {'axis': 2}),
-  'Identity': (1, 1, {}),
-  'Relu': (1, 1, {}),
-  'Sigmoid': (1, 1, {}),
-  'Tanh': (1, 1, {}),
-  'Exp': (1, 1, {}),
-  'Sqrt': (1, 1, {}),
-  'Abs': (1, 1, {}),
-  'Neg': (1, 1, {}),
-  'Log': (1, 1, {}),
-  'LeakyRelu': (1, 1, {'alpha': 1}),
-  'Add': (2, 2, {}),
-  'Sub': (2, 2, {}),
-  'Mul': (2, 2, {}),
-  'Div': (2, 2, {}),
-  'MatMul': (2, 2, {}),
-  'Gemm': (2, 3, {'alpha': 1, 'beta': 1, 'transA': 2, 'transB': 2}),
-  'Softmax': (1, 1, {'axis': 2}),
-  'Flatten': (1, 1, {'axis': 2}),
-  'Reshape': (2, 2, {'allowzero': 2}),
-  'Transpose': (1, 1, {'perm': 7}),
-  'Constant': (
-    0,
-    0,
-    {
-      'value': 4,
-      'value_float': 1,
-      'value_floats': 6,
-      'value_int': 2,
-      'value_ints': 7,
-      'value_string': 3,
-      'value_strings': 8
-    }
-  ),
-  'Concat': (1, 0x7fffffff, {'axis': 2}),
-  'Conv': (
-    2,
-    3,
-    {
-      'kernel_shape': 7,
-      'auto_pad': 3,
-      'pads': 7,
-      'strides': 7,
-      'dilations': 7,
-      'group': 2
-    }
-  ),
-  'MaxPool': (
-    1,
-    1,
-    {
-      'kernel_shape': 7,
-      'auto_pad': 3,
-      'pads': 7,
-      'strides': 7,
-      'dilations': 7,
-      'ceil_mode': 2,
-      'storage_order': 2
-    }
-  ),
-  'AveragePool': (
-    1,
-    1,
-    {
-      'kernel_shape': 7,
-      'dilations': 7,
-      'auto_pad': 3,
-      'pads': 7,
-      'strides': 7,
-      'ceil_mode': 2,
-      'count_include_pad': 2
-    }
-  ),
-  'GlobalAveragePool': (1, 1, {}),
-  'BatchNormalization': (
-    5,
-    5,
-    {'epsilon': 1, 'momentum': 1, 'training_mode': 2}
-  ),
-};
+    '1',
+    {'K': 2, 'N': 2, 'bits': 2, 'block_size': 2, 'accuracy_level': 2},
+    ['K', 'N', 'bits', 'block_size']);
