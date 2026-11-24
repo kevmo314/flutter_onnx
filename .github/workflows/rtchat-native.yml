@@ -1,0 +1,144 @@
+name: Verify migrated RTChat native unit suites
+on:
+  push:
+    paths: ['.github/workflows/rtchat-native.yml']
+permissions:
+  contents: read
+env:
+  # https://huggingface.co/Supertone/supertonic-3, pinned.
+  SUPERTONIC_REVISION: 3cadd1ee6394adea1bd021217a0e650ede09a323
+  MODEL_DIR: ${{ github.workspace }}/../supertonic-3
+
+jobs:
+  xctest:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: muxable/rtchat
+          ref: 44fc55c6c246488500517b0527f149e88c02b24f
+      - name: Apply the pinned RTChat migration
+        run: |
+          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/02cc5bafb0979455194eadccc6c9a7ac637db014/migration.patch -o "$RUNNER_TEMP/migration.patch"
+          git apply "$RUNNER_TEMP/migration.patch"
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ env.MODEL_DIR }}
+          key: supertonic-3-${{ env.SUPERTONIC_REVISION }}
+      - run: bash .github/scripts/download-supertonic.sh 3 "$MODEL_DIR"
+
+      - name: Resolve the Swift package
+        working-directory: packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore
+        run: |
+          xcodebuild -resolvePackageDependencies
+          xcodebuild -list
+
+      - name: Pick a simulator
+        run: |
+          set -euo pipefail
+          udid=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          for runtime in sorted(devices, reverse=True):
+              if "iOS" not in runtime:
+                  continue
+              for d in devices[runtime]:
+                  if d["name"].startswith("iPhone"):
+                      print(d["udid"]); sys.exit()
+          ')
+          echo "SIMULATOR=$udid" >> "$GITHUB_ENV"
+          xcrun simctl boot "$udid" || true
+          xcrun simctl list devices | grep "$udid"
+
+      - name: Run the XCTests
+        working-directory: packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore
+        run: |
+          status=0
+          TEST_RUNNER_SUPERTONIC_MODEL_DIR="$MODEL_DIR" xcodebuild test \
+            -scheme OnDeviceTtsCore -configuration Debug \
+            -destination "id=$SIMULATOR" -parallel-testing-enabled NO \
+            > "$RUNNER_TEMP/xctest.log" 2>&1 || status=$?
+          grep -E "^(Test (Case|Suite)|PARITY|SYNTH|SPEAK|STOP|on_device_tts:)|error:|\*\* " "$RUNNER_TEMP/xctest.log" || true
+          if [ "$status" != 0 ]; then
+            tail -n 200 "$RUNNER_TEMP/xctest.log"
+            exit "$status"
+          fi
+          if grep -E "Test Case .* skipped" "$RUNNER_TEMP/xctest.log"; then
+            echo "::error::tests were skipped"
+            exit 1
+          fi
+          {
+            echo '### Parity with the reference (supertonic PyPI)'
+            echo '```'
+            grep -E "^(PARITY|SYNTH|SPEAK|STOP)" "$RUNNER_TEMP/xctest.log" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: xctest-logs
+          path: ${{ runner.temp }}/*.log
+
+  android-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: muxable/rtchat
+          ref: 44fc55c6c246488500517b0527f149e88c02b24f
+      - name: Apply the pinned RTChat migration
+        run: |
+          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/02cc5bafb0979455194eadccc6c9a7ac637db014/migration.patch -o "$RUNNER_TEMP/migration.patch"
+          git apply "$RUNNER_TEMP/migration.patch"
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install supertonic==1.3.1
+      - run: flutter pub get
+      - run: flutter pub get
+        working-directory: packages/on_device_tts
+      - uses: actions/cache@v6
+        with:
+          path: ${{ env.MODEL_DIR }}
+          key: supertonic-3-${{ env.SUPERTONIC_REVISION }}
+      - name: Run the RTChat app test suite
+        run: flutter test --reporter expanded
+      - name: Prepare reference PCM for the default pack
+        run: |
+          bash .github/scripts/download-supertonic.sh 3 "$MODEL_DIR"
+          python -I packages/on_device_tts/tool/supertonic_reference.py "$MODEL_DIR" "$RUNNER_TEMP/reference"
+      - name: Run plugin tests with the default voice pack
+        if: runner.os == 'Linux'
+        working-directory: packages/on_device_tts
+        run: SUPERTONIC_PARITY_DIR="$RUNNER_TEMP/reference" flutter test
+      - name: Compare the smaller voice pack through the Flutter worker
+        if: runner.os == 'Linux'
+        run: |
+          bash .github/scripts/download-supertonic.sh 2 "$RUNNER_TEMP/supertonic-2"
+          python -I packages/on_device_tts/tool/supertonic_reference.py "$RUNNER_TEMP/supertonic-2" "$RUNNER_TEMP/reference2"
+          cd packages/on_device_tts
+          SUPERTONIC_PARITY_DIR="$RUNNER_TEMP/reference2" flutter test test/graph_worker_test.dart
+      - uses: actions/setup-java@v6
+        if: runner.os == 'Linux'
+        with:
+          distribution: zulu
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v6
+        if: runner.os == 'Linux'
+      - name: Install the Android NDK and emulator image
+        if: runner.os == 'Linux'
+        run: bash .github/scripts/prepare-supertonic-android.sh
+      - name: Run Kotlin parity tests against the Python tensors
+        if: runner.os == 'Linux'
+        run: |
+          flutter build apk --config-only
+          cd android
+          SUPERTONIC_PARITY_DIR="$RUNNER_TEMP/reference" ./gradlew :on_device_tts:testDebugUnitTest --console=plain
