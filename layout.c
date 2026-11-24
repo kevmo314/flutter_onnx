@@ -1,44 +1,78 @@
 #include <Accelerate/Accelerate.h>
+#include <dispatch/dispatch.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-static double now(void) {return clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)*1e-9;}
-static void case_(int f,int k,int t,int b) {
- const int n=b*t,cap=(n+63)&~63;
- float *w=malloc(f*k*4),*wt=malloc(f*k*4),*x=malloc(b*t*k*4),*ref=malloc(b*f*t*4);
- float *a=malloc(k*cap*4),*c=malloc(f*cap*4),*y=malloc(b*f*t*4);
- for(int i=0;i<f*k;i++)w[i]=(float)rand()/RAND_MAX-.5f;
- for(int i=0;i<b*t*k;i++)x[i]=(float)rand()/RAND_MAX-.5f;
- for(int i=0;i<f;i++)for(int j=0;j<k;j++)wt[j*f+i]=w[i*k+j];
- double start=now();
- for(int test=0;test<20;test++)for(int v=0;v<b;v++)
-   cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,f,t,k,1,w,k,x+v*t*k,t,0,ref+v*f*t,t);
- double base=(now()-start)/20, best=1e10;int mode_best=0,align_best=0;
- printf("BASE %d %d %d %d %.3f ms\n",f,k,t,b,base*1000);
- for(int mode=0;mode<4;mode++)for(int align=1;align<=64;align*=2) {
-  if(align>1 && ((n+align-1)&~(align-1))==((n+align/2-1)&~(align/2-1)))continue;
-  int p=(n+align-1)&~(align-1);
-  memset(a,0,k*p*4);start=now();
-  for(int trial=0;trial<20;trial++) {
-   for(int j=0;j<k;j++)for(int v=0;v<b;v++)
-     memcpy(a+j*p+v*t,x+(v*k+j)*t,t*4);
-   if(mode<2)cblas_sgemm(CblasRowMajor,mode?CblasTrans:CblasNoTrans,CblasNoTrans,
-       f,p,k,1,mode?wt:w,mode?f:k,a,p,0,c,p);
-   else cblas_sgemm(CblasRowMajor,CblasTrans,mode==2?CblasNoTrans:CblasTrans,
-       p,f,k,1,a,p,mode==2?wt:w,mode==2?f:k,0,c,f);
-   for(int j=0;j<f;j++)for(int v=0;v<b;v++) {
-     if(mode<2)memcpy(y+(v*f+j)*t,c+j*p+v*t,t*4);
-     else for(int s=0;s<t;s++)y[(v*f+j)*t+s]=c[(v*t+s)*f+j];
-   }
-  }
-  double ms=(now()-start)/20,diff=0;
-  for(int j=0;j<b*f*t;j++)diff=fmax(diff,fabs(ref[j]-y[j]));
-  if(ms<best){best=ms;mode_best=mode;align_best=align;}
-  printf("LAYOUT %d %d %d %d %d %d %.3f ms diff=%g\n",f,k,t,b,mode,align,ms*1000,diff);
- }
- printf("BEST %d %d %d %d mode=%d align=%d time=%.3f speedup=%.2f\n",f,k,t,b,mode_best,align_best,best*1000,base/best);
- free(w);free(wt);free(x);free(a);free(c);free(y);free(ref);
+
+static double now(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) * 1e-9; }
+static double polynomial(double x) {
+  double t = 1 / (1 + .3275911*fabs(x));
+  return (((((1.061405429*t-1.453152027)*t+1.421413741)*t-.284496736)*t+.254829592)*t);
 }
-int main(void){for(int i=0;i<2;i++){int f=i?512:2048,k=i?2048:512;case_(f,k,21,2);case_(f,k,52,2);case_(f,k,26,2);case_(f,k,21,1);}return 0;}
+static void activate(float *v, int len, int fast) {
+  enum { block = 128 };
+  if (!fast) {
+    for(int i=0;i<len;i++) {
+      double x=(float)((double)v[i]/1.4142135381698608);
+      float erf=x==0?x:copysign(1-polynomial(x)*exp(-x*x),x);
+      v[i]=(v[i]*(1.f+erf))*.5f;
+    }
+    return;
+  }
+  for (int s=0;s<len;s+=block) {
+    double x[block], e[block], p[block];
+    int n=len-s<block?len-s:block;
+    for(int i=0;i<n;i++) {
+      x[i]=(float)((double)v[s+i]/1.4142135381698608);
+      e[i]=-x[i]*x[i];p[i]=polynomial(x[i]);
+    }
+    vvexp(e,e,&n);
+    for(int i=0;i<n;i++) {
+      float erf=x[i]==0?x[i]:copysign(1-p[i]*e[i],x[i]);
+      v[s+i]=(v[s+i]*(1.f+erf))*.5f;
+    }
+  }
+}
+typedef struct { int f,k,p,t,b,workers,fast,gelu;const float *w,*x;float *product,*out; } Job;
+static void work(void *context, size_t index) {
+  Job *q=context;
+  int first=q->f*index/q->workers,end=q->f*(index+1)/q->workers;
+  cblas_sgemm(CblasRowMajor,CblasTrans,CblasNoTrans,end-first,q->p,q->k,1,q->w+first,q->f,q->x,q->p,0,q->product+(size_t)first*q->p,q->p);
+  for(int b=0;b<q->b;b++){
+    float *dst=q->out+((size_t)b*q->f+first)*q->t;
+    for(int f=first;f<end;f++){
+      for(int t=0;t<q->t;t++)dst[(f-first)*q->t+t]=q->product[(size_t)f*q->p+b*q->t+t]+.34f;
+    }
+    if(q->gelu)activate(dst,(end-first)*q->t,q->fast);
+  }
+}
+static void compare(int f,int k,int t,int b,int gelu) {
+  int p=(b*t+3)&~3;
+  float *w=malloc(f*k*4),*x=malloc(k*p*4),*out=malloc(f*t*b*4),*prod=malloc(f*p*4),*ref=malloc(f*t*b*4);
+  for(int i=0;i<f*k;i++)w[i]=((float)rand()/RAND_MAX-.5f)*.1f;
+  for(int i=0;i<k*p;i++)x[i]=(float)rand()/RAND_MAX-.5f;
+  dispatch_queue_t pool=dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0);
+  for(int fast=0;fast<=gelu;fast++)for(int workers=1;workers<=3;workers++){
+    Job j={f,k,p,t,b,workers,fast,gelu,w,x,prod,out};
+    double times[7];
+    for(int r=0;r<7;r++){
+      double start=now();
+      for(int run=0;run<20;run++) {
+        if(workers==1)work(&j,0);else dispatch_apply_f(workers,pool,&j,work);
+      }
+      times[r]=(now()-start)*50;
+    }
+    for(int i=0;i<7;i++)for(int k=i+1;k<7;k++)if(times[k]<times[i]){double a=times[i];times[i]=times[k];times[k]=a;}
+    if(workers==1 && fast==0)memcpy(ref,out,f*t*b*4);
+    double err=0;
+    for(int i=0;i<f*t*b;i++)err=fmax(err,fabs(ref[i]-out[i]));
+    printf("TILE %d %d %d %d gelu=%d vector=%d threads=%d ms=%.3f error=%.9g\n",f,k,t,b,gelu,fast,workers,times[3],err);
+  }
+  free(w);free(x);free(out);free(prod);free(ref);
+}
+int main(void) {
+  for(int i=0;i<2;i++)for(int t=21;t<=53;t+=16)compare(i?512:2048,i?2048:512,t,2,!i);
+}
