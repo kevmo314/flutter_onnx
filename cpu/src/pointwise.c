@@ -87,7 +87,7 @@ static float expanded_gelu(float value) {
 #ifdef __APPLE__
 typedef struct {
   BNNSFilter product;
-  int has_bias;
+  int has_bias, threads;
   float bias[];
 } dense_filter;
 
@@ -118,6 +118,7 @@ EXPORT void *onnx_fc_create(const float *weights, const float *bias,
       free(prepared);
       return NULL;
     }
+    prepared->threads = threads;
     prepared->has_bias = bias != NULL;
     if (bias)
       memcpy(prepared->bias, bias, (size_t)filters * sizeof(float));
@@ -130,6 +131,29 @@ EXPORT void onnx_fc_destroy(void *handle) {
   dense_filter *filter = handle;
   BNNSFilterDestroy(filter->product);
   free(filter);
+}
+
+typedef struct {
+  const dense_filter *filter;
+  float *values;
+  int width, filters, rows, workers, gelu;
+} dense_activation;
+
+static void activate_projection(void *context, size_t worker) {
+  const dense_activation *job = context;
+  const int first = job->rows * worker / job->workers;
+  const int end = job->rows * (worker + 1) / job->workers;
+  float *values = job->values + (size_t)first * job->width;
+  if (job->filter->has_bias) {
+    for (int row = first; row < end; ++row) {
+      float *dst = job->values + (size_t)row * job->width;
+      const float bias = job->filter->bias[row % job->filters];
+      for (int t = 0; t < job->width; ++t)
+        dst[t] += bias;
+    }
+  }
+  if (job->gelu)
+    activate_span(values, (size_t)(end - first) * job->width);
 }
 
 EXPORT int onnx_fc_run(void *filter, const float *x, float *y, int batch,
@@ -154,17 +178,15 @@ EXPORT int onnx_fc_run(void *filter, const float *x, float *y, int batch,
   if (success) {
     for (int b = 0; b < batch; ++b)
       vDSP_mtrans(products + b * ny, 1, y + b * ny, 1, filters, width);
-    if (prepared->has_bias) {
-      for (int b = 0; b < batch; ++b) {
-        for (int f = 0; f < filters; ++f) {
-          float *row = y + b * ny + (size_t)f * width;
-          for (int t = 0; t < width; ++t)
-            row[t] += prepared->bias[f];
-        }
-      }
-    }
-    if (gelu)
-      activate_span(y, batch * ny);
+    const int parallel = gelu && prepared->threads > 1 && batch * ny >= 32768;
+    dense_activation job = {prepared, y, width, filters, batch * filters,
+                            parallel ? 2 : 1, gelu};
+    if (parallel)
+      dispatch_apply_f(job.workers,
+                       dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+                       &job, activate_projection);
+    else
+      activate_projection(&job, 0);
     if (repeated)
       memcpy(y + ny, y, ny * sizeof(float));
   }
