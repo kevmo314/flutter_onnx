@@ -41,7 +41,8 @@ python tool/verify_models.py --cache /tmp/onnx-models squeezenet1_1 mobilenetv2_
 python tool/verify_models.py --cache /tmp/onnx-models qwen qwen_q4 qwen3_q4
 python tool/verify_qwen35.py --cache /tmp/onnx-models/qwen35
 python tool/verify_qwen35.py --cache /tmp/onnx-models/qwen35 --image
+python tool/verify_qwen35.py --cache /tmp/onnx-models/qwen35 --image --browser chromium
 python tool/verify_models.py --cache /tmp/onnx-models --browser chromium qwen_q4
 ```
 
-`python tool/opset_conformance.py --strict` requires every catalogued operator to have test coverage and every case to pass. GitHub Actions runs the Dart VM, browser, WebGPU, Android emulator and iPhone simulator checks. Manually dispatch the Platform inference workflow to run the full four-bit Qwen comparison and strict opset suite on the Android emulator and iPhone simulator. The ONNX compatibility workflow runs the strict audit on the Dart VM and headless Chrome. Include `--browser chromium` when reproducing the audit in a local browser. The default push checks use the cached-attention and XOR fixtures. Physical mobile hardware remains a separate verification target.
+`python tool/opset_conformance.py --strict` requires every catalogued operator to have test coverage and every case to pass. GitHub Actions runs the Dart VM, browser, WebGPU, Android emulator and iPhone simulator checks. Manually dispatch the Platform inference workflow to run the full four-bit Qwen2.5 and Qwen3 comparisons and strict opset suite on the Android emulator and iPhone simulator. The ONNX compatibility workflow runs the strict audit on the Dart VM and headless Chrome. Include `--browser chromium` when reproducing the audit in a local browser. The default push checks use the cached-attention and XOR fixtures. Physical mobile hardware remains a separate verification target.

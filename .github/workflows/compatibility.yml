@@ -31,3 +31,7 @@ jobs:
         run: python tool/verify_qwen35.py --cache /tmp/models/qwen35
       - if: github.event_name == 'workflow_dispatch'
         run: python tool/verify_qwen35.py --cache /tmp/models/qwen35 --image
+      - if: github.event_name == 'workflow_dispatch'
+        run: python tool/verify_models.py --cache /tmp/models --browser google-chrome qwen qwen_q4 qwen3_q4
+      - if: github.event_name == 'workflow_dispatch'
+        run: python tool/verify_qwen35.py --cache /tmp/models/qwen35 --browser google-chrome --image

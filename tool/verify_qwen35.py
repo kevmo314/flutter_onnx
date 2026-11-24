@@ -2,7 +2,7 @@
 
 import argparse
 import hashlib
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from pathlib import Path
 import subprocess
 import tempfile
@@ -10,6 +10,7 @@ import urllib.request
 
 import numpy as np
 import onnxruntime as ort
+from device_runner import DeviceRunner
 from verify_models import exchange
 
 BASE = "https://huggingface.co/onnx-community/Qwen3.5-0.8B-ONNX/resolve/8fe9dbe3fb39fe902e18df9be84b6a0ac77ae0f6/onnx/"
@@ -21,7 +22,7 @@ HASHES = {
 }
 
 
-def run(cache, folder, exe, image=False):
+def run(cache, folder, exe, image=False, browser=None):
     cache.mkdir(parents=True, exist_ok=True)
     files = dict(HASHES)
     if image:
@@ -78,6 +79,11 @@ def run(cache, folder, exe, image=False):
     with ExitStack() as stack:
 
         def process():
+            if browser:
+                profile = Path(
+                    stack.enter_context(tempfile.TemporaryDirectory(dir=folder))
+                )
+                return stack.enter_context(closing(DeviceRunner(profile, exe, browser)))
             proc = stack.enter_context(
                 subprocess.Popen(
                     [str(exe)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
@@ -169,6 +175,9 @@ def main():
     p.add_argument("--cache", type=Path, required=True)
     p.add_argument("--runner", type=Path)
     p.add_argument(
+        "--browser", help="Run each ONNX graph in an isolated Chromium process."
+    )
+    p.add_argument(
         "--image",
         action="store_true",
         help="Include the vision encoder and feed its features to the hybrid decoder.",
@@ -176,13 +185,22 @@ def main():
     args = p.parse_args()
     with tempfile.TemporaryDirectory() as tmp:
         folder = Path(tmp)
-        exe = args.runner.resolve() if args.runner else folder / "compare"
+        exe = (
+            args.runner.resolve()
+            if args.runner
+            else folder / ("client.js" if args.browser else "compare")
+        )
         if not args.runner:
             subprocess.run(
-                ["dart", "compile", "exe", "tool/compare_runner.dart", "-o", str(exe)],
+                (
+                    ["dart", "compile", "js", "-O2", "tool/model_client.dart"]
+                    if args.browser
+                    else ["dart", "compile", "exe", "tool/compare_runner.dart"]
+                )
+                + ["-o", str(exe)],
                 check=True,
             )
-        run(args.cache.resolve(), folder, exe, args.image)
+        run(args.cache.resolve(), folder, exe, args.image, args.browser)
 
 
 if __name__ == "__main__":

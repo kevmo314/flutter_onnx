@@ -66,7 +66,7 @@ jobs:
           working-directory: example
           script: |
             bash ../tool/check_mobile.sh android
-            if [ "$FULL_MODELS" = "true" ]; then cd .. && python tool/verify_models.py --cache "$RUNNER_TEMP/models" --device android qwen_q4 && python tool/opset_conformance.py --device android --strict --baseline tool/conformance-baseline.txt --report android-opset.json; fi
+            if [ "$FULL_MODELS" = "true" ]; then cd .. && python tool/verify_models.py --cache "$RUNNER_TEMP/models" --device android qwen_q4 qwen3_q4 && python tool/opset_conformance.py --device android --strict --baseline tool/conformance-baseline.txt --report android-opset.json; fi
       - uses: actions/upload-artifact@v4
         if: always() && github.event_name == 'workflow_dispatch'
         with:
@@ -98,7 +98,7 @@ jobs:
           bash ../tool/check_mobile.sh ios "$simulator"
           if [ "$FULL_MODELS" = "true" ]; then
             cd ..
-            python tool/verify_models.py --cache "$RUNNER_TEMP/models" --device "$simulator" qwen_q4
+            python tool/verify_models.py --cache "$RUNNER_TEMP/models" --device "$simulator" qwen_q4 qwen3_q4
             python tool/opset_conformance.py --device "$simulator" --strict --baseline tool/conformance-baseline.txt --report ios-opset.json
           fi
       - uses: actions/upload-artifact@v4
