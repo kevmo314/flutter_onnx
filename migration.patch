@@ -96,10 +96,10 @@ index 0000000..8bed4ef
 +install_package 'system-images;android-35;google_apis;x86_64' "$sdk/system-images/android-35/google_apis/x86_64/system.img"
 diff --git a/.github/scripts/profile-supertonic-device.sh b/.github/scripts/profile-supertonic-device.sh
 new file mode 100644
-index 0000000..c8ace1d
+index 0000000..b740d9f
 --- /dev/null
 +++ b/.github/scripts/profile-supertonic-device.sh
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,145 @@
 +#!/usr/bin/env bash
 +# Run from the RTChat app root with the model staged on the runner.
 +set -euo pipefail
@@ -233,6 +233,17 @@ index 0000000..c8ace1d
 +        raise SystemExit(f"Unexpected playback events: {row}")
 +    if row["round"] > 1 and not audio - 50 < row["speak_ms"] < audio + 10_000:
 +        raise SystemExit(f"Missed the playback deadline for {audio:.0f} ms of audio: {row}")
++warm_first_ms = [row["first_audio_ms"] for row in rounds if row["round"] > 1]
++whole_first_ms = baseline[0]["first_audio_ms"]
++if sum(warm_first_ms) / len(warm_first_ms) >= whole_first_ms:
++    raise SystemExit(f"Streaming failed to reduce warm startup: {warm_first_ms}, whole message {whole_first_ms} ms")
++for row in rounds[1:]:
++    print(json.dumps({
++        "playback_round": row["round"],
++        "startup_saved_ms": whole_first_ms - row["first_audio_ms"],
++        "inference_after_first_audio_ms": row["last_pcm_ready_ms"] - row["first_audio_ms"],
++        "playback_elapsed_minus_pcm_ms": round(row["done_ms"] - row["first_audio_ms"] - audio, 1),
++    }))
 +PY
 diff --git a/.github/scripts/test-supertonic-device.sh b/.github/scripts/test-supertonic-device.sh
 new file mode 100644
@@ -1733,7 +1744,7 @@ index bca516c..4c22e8b 100644
  ## Audio robustness
  
 diff --git a/packages/on_device_tts/doc/native_contract.md b/packages/on_device_tts/doc/native_contract.md
-index 0f68bd4..19f68b6 100644
+index 0f68bd4..8f886e9 100644
 --- a/packages/on_device_tts/doc/native_contract.md
 +++ b/packages/on_device_tts/doc/native_contract.md
 @@ -1,7 +1,7 @@
@@ -1822,7 +1833,7 @@ index 0f68bd4..19f68b6 100644
  * Android JVM: `SUPERTONIC_PARITY_DIR=<dir> ./gradlew
    :on_device_tts:testDebugUnitTest` from the app's `android/`
    (`ReferenceParityTest`, desktop ONNX Runtime).
-@@ -339,3 +326,43 @@ Expected: fp32 output within 1e-3 max abs difference of the reference (bit
+@@ -339,3 +326,63 @@ Expected: fp32 output within 1e-3 max abs difference of the reference (bit
  exact on the same ONNX Runtime CPU build). int8 models are only comparable
  on the same CPU and build: ONNX Runtime's quantized kernels differ between
  builds, and the differences grow through the flow-matching steps.
@@ -1839,22 +1850,42 @@ index 0f68bd4..19f68b6 100644
 +The completion time includes
 +playback. Acoustic latency requires a physical device and an audio capture.
 +
-+The profiler then calls the public synthesis API for each segment with fresh
-+noise seeds. It divides the elapsed synthesis time in each round by the
++The profiler then consumes the public PCM stream with fresh noise seeds and
++records the arrival of each phrase. It divides each round’s synthesis time by the
 +duration of the returned PCM. CI requires a real-time factor below 1 in all
 +three rounds. The JSONL artifact contains the individual segment factors,
 +the total for each round, and the player event times. On Android the app
 +runs as an AOT profile build on an API 35 x86-64 emulator. On iOS it runs
 +as a debug build on an Apple Silicon iPhone simulator.
 +
-+On the Android emulator the migrated app generated the full 6.749 seconds of
-+speech in 3.40–3.63 seconds (real-time factor 0.50–0.54). Model load took
-+2.52 seconds. After warm-up the first-audio event arrived in 0.83–0.88
-+seconds and playback completed in 7.91–7.93 seconds. The debug integration test
-+passed all five multilingual reference waveforms using the same runtime
-+revision. The largest absolute sample error was 0.0006361.
++The Android API 35 emulator generated the 6.749 seconds of PCM in
++2.066–2.121 seconds (real-time factor 0.306–0.314). Model load took
++1.511 seconds. The following times start when the native player received
++the request, with the model already warm.
 +
-+[Android device tests and playback timings](https://github.com/kevmo314/flutter_onnx/actions/runs/45502140362/job/138827892137) · [Device test and profiling scripts](../../../.github/scripts/)
++| Android playback | First audio | Final PCM ready | Playback complete |
++| --- | ---: | ---: | ---: |
++| Streamed phrases, warm 1 | 0.490 s | 2.007 s | 7.281 s |
++| Streamed phrases, warm 2 | 0.463 s | 1.991 s | 7.264 s |
++| Same words in one segment | 1.565 s | 1.564 s | 6.981 s |
++
++Phrasing changes the duration predicted by Supertonic. CI compares mean warm
++startup against the whole-message run on the same player. In the streamed runs,
++inference continued for 1.517–1.528 seconds after playback started.
++The debug integration tests passed all five multilingual comparisons against
++Supertone with a largest absolute PCM error of 0.000809.
++
++[Android integration tests and raw timing records](https://github.com/kevmo314/flutter_onnx/actions/runs/45508004100/job/138848112543) · [Profiling script](../../../.github/scripts/profile-supertonic-device.sh)
++
++On an iPhone 17 Pro simulator, the initial streamed implementation started
++playing in 1.604–2.217 seconds warm, compared with 5.651 seconds for the same
++words as one segment. It produced 6.749 seconds of audio in 5.467–6.201
++seconds. Time from first audio through playback completion exceeded the PCM
++duration by 2.39–3.01 seconds. Phrase-level buffering allows gaps when the
++next phrase takes longer to generate than the audio already queued. This
++measurement used runtime revision 999405e before the frame-major BLAS change.
++
++[iOS streaming profile and raw timing records](https://github.com/kevmo314/flutter_onnx/actions/runs/45509065218/job/138858328831)
 +
 +An early trace attributed 86% of graph execution time to the denoiser.
 +That measurement guided the optimized convolution and activation kernels.
@@ -2064,7 +2095,7 @@ index 0000000..343fdd4
 +  return result
 +}
 diff --git a/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/Supertonic/SupertonicModel.swift b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/Supertonic/SupertonicModel.swift
-index c5c0408..173f977 100644
+index c5c0408..27b2ce6 100644
 --- a/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/Supertonic/SupertonicModel.swift
 +++ b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Sources/OnDeviceTtsCore/Supertonic/SupertonicModel.swift
 @@ -26,14 +26,6 @@
@@ -2097,7 +2128,17 @@ index c5c0408..173f977 100644
  /// predictor, text encoder, vector estimator, vocoder), the text processor
  /// and the voice styles.
  ///
-@@ -90,26 +82,12 @@ public final class SupertonicModel {
+@@ -77,8 +69,7 @@ public final class SupertonicModel {
+   public let sampleRate: Int
+   /// The voices, sorted by id.
+   public let voices: [SupertonicVoice]
+-  /// The execution provider each of the four models runs on, after any
+-  /// fallback, e.g. `["coreml", "coreml", "cpu", "cpu"]`.
++  /// The execution provider used by each graph, in model order.
+   public let providers: [String]
+   public let textProcessor: SupertonicTextProcessor
+ 
+@@ -90,26 +81,12 @@ public final class SupertonicModel {
    private let baseChunkSize: Int
    private let chunkCompressFactor: Int
    private let latentDim: Int
@@ -2129,7 +2170,7 @@ index c5c0408..173f977 100644
      let root = URL(fileURLWithPath: modelDir, isDirectory: true)
      let fm = FileManager.default
      var isDirectory: ObjCBool = false
-@@ -166,94 +144,14 @@ public final class SupertonicModel {
+@@ -166,94 +143,14 @@ public final class SupertonicModel {
  
      voices = try SupertonicModel.loadVoices(root.appendingPathComponent("voice_styles"))
  
@@ -2226,7 +2267,7 @@ index c5c0408..173f977 100644
    /// Every `*.json` file in `dir`, sorted by id (the file name without
    /// `.json`).
    private static func loadVoices(_ dir: URL) throws -> [SupertonicVoice] {
-@@ -279,7 +177,7 @@ public final class SupertonicModel {
+@@ -279,7 +176,7 @@ public final class SupertonicModel {
      guard let dict = json as? [String: Any] else {
        throw SupertonicError.invalidModel("\(name) is not an object")
      }
@@ -2235,7 +2276,7 @@ index c5c0408..173f977 100644
        guard let component = dict[key] as? [String: Any], let dims = component["dims"] as? [Int],
          let data = component["data"]
        else {
-@@ -364,7 +262,7 @@ public final class SupertonicModel {
+@@ -364,7 +261,7 @@ public final class SupertonicModel {
    /// One chunk through the four models (supertonic/core.py
    /// `Supertonic.__call__`), trimmed to the predicted duration.
    func infer(
@@ -2244,7 +2285,7 @@ index c5c0408..173f977 100644
      steps: Int, noise: inout NoiseGenerator, isCancelled: () -> Bool
    ) throws -> [Float] {
      func check() throws {
-@@ -424,31 +322,9 @@ public final class SupertonicModel {
+@@ -424,31 +321,9 @@ public final class SupertonicModel {
      return Array(wav.prefix(wavLength))
    }
  
@@ -2931,7 +2972,7 @@ index 65eb34d..14d25f8 100644
  // alternative. Models requiring phonemes need a separate engine integration.
  //
 diff --git a/packages/on_device_tts/pubspec.yaml b/packages/on_device_tts/pubspec.yaml
-index f6b7f11..66ce9e9 100644
+index f6b7f11..6e40d92 100644
 --- a/packages/on_device_tts/pubspec.yaml
 +++ b/packages/on_device_tts/pubspec.yaml
 @@ -1,15 +1,24 @@
@@ -2952,12 +2993,12 @@ index f6b7f11..66ce9e9 100644
 +  flutter_onnx:
 +    git:
 +      url: https://github.com/kevmo314/flutter_onnx.git
-+      ref: 999405e48362ab27dc0dc8291c5d0691338e3e4a
++      ref: 67c2a2b812e45f58e55075ee4a04898359d55505
 +  flutter_onnx_cpu:
 +    git:
 +      url: https://github.com/kevmo314/flutter_onnx.git
 +      path: cpu
-+      ref: 999405e48362ab27dc0dc8291c5d0691338e3e4a
++      ref: 67c2a2b812e45f58e55075ee4a04898359d55505
    background_downloader: ^9.6.4
    crypto: ^3.0.7
    flutter:
@@ -3317,7 +3358,7 @@ index cd1d14e..cd707b7 100644
      handler = (call) async => call.method == 'load' ? 'supertonic-3' : null;
      final tts = await OnnxTts.load(modelDir: '/m', platform: platform);
 diff --git a/pubspec.lock b/pubspec.lock
-index 8ecf368..553736e 100644
+index 8ecf368..dd4f044 100644
 --- a/pubspec.lock
 +++ b/pubspec.lock
 @@ -9,6 +9,14 @@ packages:
@@ -3356,8 +3397,8 @@ index 8ecf368..553736e 100644
 +    dependency: transitive
 +    description:
 +      path: "."
-+      ref: "999405e48362ab27dc0dc8291c5d0691338e3e4a"
-+      resolved-ref: "999405e48362ab27dc0dc8291c5d0691338e3e4a"
++      ref: "67c2a2b812e45f58e55075ee4a04898359d55505"
++      resolved-ref: "67c2a2b812e45f58e55075ee4a04898359d55505"
 +      url: "https://github.com/kevmo314/flutter_onnx.git"
 +    source: git
 +    version: "0.1.0"
@@ -3365,8 +3406,8 @@ index 8ecf368..553736e 100644
 +    dependency: transitive
 +    description:
 +      path: cpu
-+      ref: "999405e48362ab27dc0dc8291c5d0691338e3e4a"
-+      resolved-ref: "999405e48362ab27dc0dc8291c5d0691338e3e4a"
++      ref: "67c2a2b812e45f58e55075ee4a04898359d55505"
++      resolved-ref: "67c2a2b812e45f58e55075ee4a04898359d55505"
 +      url: "https://github.com/kevmo314/flutter_onnx.git"
 +    source: git
 +    version: "0.1.0"
