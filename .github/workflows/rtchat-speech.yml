@@ -38,7 +38,7 @@ jobs:
       - name: Prepare the migrated app with the runtime under test
         working-directory: rtchat
         run: |
-          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/02cc5bafb0979455194eadccc6c9a7ac637db014/migration.patch -o "$RUNNER_TEMP/rtchat.patch"
+          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/3e53338c9b849d1a50c3dbc1dad0fa8d190745e5/migration.patch -o "$RUNNER_TEMP/rtchat.patch"
           git apply "$RUNNER_TEMP/rtchat.patch"
           cat > pubspec_overrides.yaml <<'EOF'
           dependency_overrides:
@@ -48,6 +48,7 @@ jobs:
               path: ../cpu
           EOF
           flutter pub get
+          flutter analyze --no-pub integration_test/profile_playback.dart integration_test/on_device_tts_test.dart
       - name: Prepare Android profile build
         if: runner.os == 'Linux'
         working-directory: rtchat
@@ -108,7 +109,14 @@ jobs:
           tar -xf ios-playback.tar
           export MODEL_DIR="$RUNNER_TEMP/supertonic-3"
           bash download-supertonic.sh 3 "$MODEL_DIR"
-          device=$(xcrun simctl list devices available -j | python3 -c 'import json, sys; print(next(d["udid"] for r, devices in json.load(sys.stdin)["devices"].items() if ".iOS-" in r for d in devices if d["name"].startswith("iPhone")))')
+          device=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          runtimes = [rt for rt, models in devices.items() if ".iOS-" in rt and any(d["name"].startswith("iPhone") for d in models)]
+          latest = max(runtimes, key=lambda rt: tuple(map(int, rt.split(".iOS-")[1].split("-"))))
+          iphone = next(d for d in devices[latest] if d["name"].startswith("iPhone"))
+          print(iphone["name"], latest, file=sys.stderr)
+          print(iphone["udid"])')
           xcrun simctl boot "$device"
           xcrun simctl bootstatus "$device" -b
           bash profile-supertonic-device.sh ios "$device" "$RUNNER_TEMP/Runner.app"
