@@ -1,6 +1,25 @@
 part of '../flutter_onnx.dart';
 
-enum TensorType { float32, int64 }
+enum TensorType {
+  float32(1, 4),
+  uint8(2, 1),
+  int8(3, 1),
+  uint16(4, 2),
+  int16(5, 2),
+  int32(6, 4),
+  int64(7, 8),
+  boolean(9, 1),
+  float16(10, 2),
+  float64(11, 8),
+  uint32(12, 4),
+  uint64(13, 8),
+  bfloat16(16, 2);
+
+  const TensorType(this.onnxId, this.bytesPerElement);
+  final int onnxId, bytesPerElement;
+  bool get floating =>
+      this == float32 || this == float16 || this == float64 || this == bfloat16;
+}
 
 /// A dense, immutable tensor stored in ONNX row-major order.
 class Tensor {
@@ -30,6 +49,102 @@ class Tensor {
     }
     return Tensor._(TensorType.int64, shape, data);
   }
+
+  /// Construct a tensor of the given numeric type. BOOL uses zero and one.
+  factory Tensor.fromValues(
+      TensorType type, List<int> shape, Iterable<num> values) {
+    if (type == TensorType.float32) return Tensor.float32(shape, values);
+    if (type == TensorType.int64)
+      return Tensor.int64(shape, values.map((v) => v.toInt()));
+    if (type == TensorType.float64)
+      return Tensor._(
+          type,
+          shape,
+          Float64List.fromList(values.map((v) => v.toDouble()).toList())
+              .asUnmodifiableView());
+    if (type == TensorType.float16 || type == TensorType.bfloat16) {
+      final store = ByteData(4);
+      return Tensor._(
+          type,
+          shape,
+          Float32List.fromList(values
+                  .map((v) => _decodeHalf(
+                      _encodeHalf(v.toDouble(), type, store), type, store))
+                  .toList())
+              .asUnmodifiableView());
+    }
+    if (type == TensorType.boolean)
+      return Tensor._(
+          type,
+          shape,
+          Uint8List.fromList(values.map((v) => v == 0 ? 0 : 1).toList())
+              .asUnmodifiableView());
+    final ints = values.map((v) => v.toInt()).toList();
+    final List<int> data = switch (type) {
+      TensorType.uint8 => Uint8List.fromList(ints).asUnmodifiableView(),
+      TensorType.int8 => Int8List.fromList(ints).asUnmodifiableView(),
+      TensorType.uint16 => Uint16List.fromList(ints).asUnmodifiableView(),
+      TensorType.int16 => Int16List.fromList(ints).asUnmodifiableView(),
+      TensorType.int32 => Int32List.fromList(ints).asUnmodifiableView(),
+      TensorType.uint32 => Uint32List.fromList(ints).asUnmodifiableView(),
+      TensorType.uint64 => ints.every((v) => v >= 0 && v <= _maxSafe)
+          ? List<int>.unmodifiable(ints)
+          : throw UnsupportedError('UINT64 exceeds portable range'),
+      TensorType.boolean =>
+        Uint8List.fromList(ints.map((v) => v == 0 ? 0 : 1).toList())
+            .asUnmodifiableView(),
+      _ => throw StateError(type.name)
+    };
+    return Tensor._(type, shape, data);
+  }
+
+  /// Decode the little-endian raw_data encoding used by ONNX.
+  factory Tensor.fromBytes(TensorType type, List<int> shape, Uint8List bytes) =>
+      _decodeRaw(type, shape, bytes);
+
+  /// Returns an independent copy of the little-endian ONNX raw_data bytes.
+  Uint8List toBytes() {
+    if (values is TypedData &&
+        type != TensorType.float16 &&
+        type != TensorType.bfloat16 &&
+        Endian.host == Endian.little) {
+      final src = values as TypedData;
+      return Uint8List.fromList(
+          src.buffer.asUint8List(src.offsetInBytes, src.lengthInBytes));
+    }
+    final out = ByteData(values.length * type.bytesPerElement),
+        store = ByteData(4);
+    for (var i = 0; i < values.length; i++) {
+      final p = i * type.bytesPerElement, v = values[i];
+      switch (type) {
+        case TensorType.float16:
+        case TensorType.bfloat16:
+          out.setUint16(
+              p, _encodeHalf(v.toDouble(), type, store), Endian.little);
+        case TensorType.int64:
+        case TensorType.uint64:
+          final b = BigInt.from(v.toInt()).toUnsigned(64);
+          out.setUint32(p, b.toUnsigned(32).toInt(), Endian.little);
+          out.setUint32(p + 4, (b >> 32).toInt(), Endian.little);
+        case TensorType.float32:
+          out.setFloat32(p, v.toDouble(), Endian.little);
+        case TensorType.float64:
+          out.setFloat64(p, v.toDouble(), Endian.little);
+        case TensorType.uint8:
+        case TensorType.int8:
+        case TensorType.boolean:
+          out.setUint8(p, v.toInt());
+        case TensorType.uint16:
+        case TensorType.int16:
+          out.setUint16(p, v.toInt(), Endian.little);
+        case TensorType.uint32:
+        case TensorType.int32:
+          out.setUint32(p, v.toInt(), Endian.little);
+      }
+    }
+    return out.buffer.asUint8List();
+  }
+
   Tensor _reshape(List<int> dims) => Tensor._(type, dims, values);
 }
 
@@ -60,8 +175,8 @@ Tensor _reorder(Tensor x, List<int> shape, int Function(int) offset) {
   if (x.type == TensorType.float32) {
     return _float(shape, (i) => x.values[offset(i)].toDouble());
   }
-  return Tensor.int64(
-      shape, List.generate(_size(shape), (i) => x.values[offset(i)].toInt()));
+  return Tensor.fromValues(
+      x.type, shape, List.generate(_size(shape), (i) => x.values[offset(i)]));
 }
 
 List<int> _strides(List<int> dims) {
@@ -82,4 +197,92 @@ int _axis(int value, int rank, {bool allowEnd = false}) {
 
 void _require(bool condition, String message) {
   if (!condition) throw ArgumentError(message);
+}
+
+Tensor _decodeRaw(TensorType type, List<int> shape, Uint8List bytes,
+    {bool sliceBound = false}) {
+  final count = _size(shape),
+      width = type.bytesPerElement,
+      d = ByteData.sublistView(bytes),
+      store = ByteData(4);
+  if (bytes.length != count * width)
+    throw const FormatException('Incorrect raw_data length');
+  if (type == TensorType.float32)
+    return _float(shape, (i) => d.getFloat32(i * 4, Endian.little));
+  if (type == TensorType.uint8)
+    return Tensor._(
+        type, shape, Uint8List.fromList(bytes).asUnmodifiableView());
+  if (type == TensorType.float16 || type == TensorType.bfloat16) {
+    final buf = Float32List(count);
+    for (var i = 0; i < count; i++) {
+      buf[i] = _decodeHalf(d.getUint16(i * 2, Endian.little), type, store);
+    }
+    return Tensor._(type, shape, buf.asUnmodifiableView());
+  }
+  num read(int i) {
+    final p = i * width;
+    switch (type) {
+      case TensorType.int64:
+      case TensorType.uint64:
+        final hi = type == TensorType.int64
+            ? d.getInt32(p + 4, Endian.little)
+            : d.getUint32(p + 4, Endian.little);
+        final v = (BigInt.from(hi) << 32) +
+            BigInt.from(d.getUint32(p, Endian.little));
+        if (sliceBound && v.abs() > BigInt.from(_maxSafe))
+          return v.sign * _maxSafe;
+        return _portableInt(v);
+      case TensorType.float64:
+        return d.getFloat64(p, Endian.little);
+      case TensorType.int32:
+        return d.getInt32(p, Endian.little);
+      case TensorType.uint32:
+        return d.getUint32(p, Endian.little);
+      case TensorType.int16:
+        return d.getInt16(p, Endian.little);
+      case TensorType.uint16:
+        return d.getUint16(p, Endian.little);
+      case TensorType.int8:
+        return d.getInt8(p);
+      case TensorType.boolean:
+        return d.getUint8(p);
+      default:
+        throw StateError(type.name);
+    }
+  }
+
+  return Tensor.fromValues(type, shape, List.generate(count, read));
+}
+
+double _decodeHalf(int bits, TensorType type, ByteData scratch) {
+  if (type == TensorType.bfloat16) {
+    scratch.setUint32(0, bits * 65536);
+    return scratch.getFloat32(0);
+  }
+  final sign = (bits & 32768) == 0 ? 1.0 : -1.0,
+      e = (bits >> 10) & 31,
+      f = bits & 1023;
+  if (e == 31) return f == 0 ? sign * double.infinity : double.nan;
+  if (e == 0) return sign * f / 16777216;
+  return sign * (1 + f / 1024) * math.pow(2, e - 15);
+}
+
+int _encodeHalf(double value, TensorType type, ByteData scratch) {
+  scratch.setFloat32(0, value);
+  final bits = scratch.getUint32(0), high = bits ~/ 65536;
+  if (type == TensorType.bfloat16) {
+    if (value.isNaN) return high | 64;
+    return (bits + 32767 + (high & 1)) ~/ 65536 & 65535;
+  }
+  final sign = high & 32768, exp = (high >> 7) & 255, f = bits & 0x7fffff;
+  if (exp == 255) return sign | (f == 0 ? 0x7c00 : 0x7e00);
+  if (exp > 142) return sign | 0x7c00;
+  if (exp < 102) return sign;
+  final shift = exp < 113 ? 126 - exp : 13;
+  final significand = exp < 113 ? 0x800000 | f : f, unit = 1 << shift;
+  var rounded = significand ~/ unit;
+  final remainder = significand % unit;
+  if (remainder * 2 > unit || (remainder * 2 == unit && rounded.isOdd))
+    rounded++;
+  return sign | ((exp < 113 ? 0 : (exp - 112) * 1024) + rounded);
 }

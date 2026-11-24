@@ -3,3 +3,4 @@ build/
 .packages
 .flutter-plugins*
 pubspec.lock
+__pycache__/

@@ -23,6 +23,20 @@ Tensor _execute(_Node n, List<Tensor?> args) {
           'Concat needs axis and nonempty input names');
       return _concat(args.cast<Tensor>(), n.integer('axis', 0));
   }
+  final arrayResult = _arrayOp(n, args);
+  if (arrayResult != null) return arrayResult;
+  if (x.type == TensorType.float16 || x.type == TensorType.bfloat16) {
+    final promoted = [
+      for (final t in args)
+        t == null
+            ? null
+            : t.type == x.type
+                ? Tensor.float32(t.shape, t.values)
+                : t
+    ];
+    final result = _execute(n, promoted);
+    return Tensor.fromValues(x.type, result.shape, result.values);
+  }
   for (final t in args.whereType<Tensor>()) {
     if (t.type != TensorType.float32)
       throw UnsupportedError('${n.label} requires FLOAT inputs');
@@ -166,17 +180,29 @@ Tensor _matmul(Tensor a, Tensor b,
   final ia = _IndexMap(ba, batches), ib = _IndexMap(bb, batches);
   final shape = [...batches, if (!av) m, if (!bv) n];
   final biasMap = bias == null ? null : _IndexMap(bias.shape, shape);
-  return _float(shape, (i) {
-    final batch = i ~/ (m * n);
-    final left = (ia.at(batch) * m + i ~/ n % m) * k;
-    final right = ib.at(batch) * k * n + i % n;
-    var dot = 0.0;
-    for (var j = 0; j < k; j++) {
-      dot += a.values[left + j] * b.values[right + j * n];
+  final out = Float32List(_size(shape));
+  final left = a.values as Float32List, right = b.values as Float32List;
+  final row = Float64List(n);
+  for (var batch = 0; batch < _size(batches); batch++) {
+    final baseA = ia.at(batch) * m * k, baseB = ib.at(batch) * k * n;
+    for (var r = 0; r < m; r++) {
+      row.fillRange(0, n, 0);
+      for (var d = 0; d < k; d++) {
+        final scale = left[baseA + r * k + d], offset = baseB + d * n;
+        for (var c = 0; c < n; c++) {
+          row[c] += scale * right[offset + c];
+        }
+      }
+      for (var c = 0; c < n; c++) {
+        final i = (batch * m + r) * n + c;
+        out[i] = alpha * row[c] +
+            (bias == null || beta == 0
+                ? 0
+                : beta * bias.values[biasMap!.at(i)]);
+      }
     }
-    return alpha * dot +
-        (bias == null || beta == 0 ? 0 : beta * bias.values[biasMap!.at(i)]);
-  });
+  }
+  return Tensor._(TensorType.float32, shape, out.asUnmodifiableView());
 }
 
 Tensor _softmax(Tensor x, int axis) {
@@ -274,7 +300,5 @@ Tensor _concat(List<Tensor> tensors, int axis) {
     }
   }
 
-  return first.type == TensorType.float32
-      ? Tensor.float32(shape, data())
-      : Tensor.int64(shape, data().cast<int>());
+  return Tensor.fromValues(first.type, shape, data());
 }

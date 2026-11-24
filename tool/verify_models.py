@@ -1,0 +1,138 @@
+"""Compare unmodified ONNX Model Zoo and Qwen exports against Python ONNX Runtime.
+
+Install numpy and onnxruntime. Run from the repo root, e.g.
+python tool/verify_models.py --cache /tmp/onnx-models resnet18 qwen
+"""
+import argparse
+import gc
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+import urllib.request
+
+import numpy as np
+import onnxruntime as ort
+
+ZOO = 'https://media.githubusercontent.com/media/onnx/models/c5cae0f1942c8d7727372c7b1f6b485aa39e4421/Computer_Vision'
+MODELS = {
+    'squeezenet1_1': ('torch_hub','fbb553444cab298bcac72cf623694e277dfe11d78662108f91ff46b6acb2cc5f'),
+    'mobilenetv2_050': ('timm','192f09d45d96c3a4ca8ea271613e2b48c37ac15a93396fde3a4d7b2ea0aad36b'),
+    'resnet18': ('torch_hub','eef70310eb26bdbc70babb290ee3239599ea9aed406bade711e3d2693b9d20e8'),
+    'efficientnet_b0': ('timm','e76596a2b9e27c7c734c38550859105b43fec926f13447a84dad175eb994068a'),
+    'densenet121': ('torch_hub','9299d867cac3e0bf40803ac737e3fdaf3cb5976ee65c82961c211a3d8be3bbdd'),
+    'mobilenetv3_small_050': ('timm','ce71d83541479fb12b543415aa620d24c518c8ee0cad60990140f05c6ea4e462')
+}
+QWEN_URL='https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct/resolve/22942cb7d7ba4cc81bb4673549ca4d4614469b5e/onnx/model.onnx'
+
+
+def obtain(name, cache):
+    if name == 'qwen_q4':
+        url,digest=QWEN_URL.replace('/model.onnx','/model_q4.onnx'),'09235a3b1c135cd04ef570e5053b5c079e028078a2cc5f76ba6a251e91bf3296'
+    elif name == 'qwen':
+        url, digest = QWEN_URL, '373b18ccddcf62f765516663f957866ce8a63e885abd1d2878cc464c5f7e25d7'
+    else:
+        source, digest = MODELS[name]
+        url = f'{ZOO}/{name}_Opset17_{source}/{name}_Opset17.onnx'
+    path = cache / (name+'.onnx')
+    if not path.exists():
+        cache.mkdir(parents=True,exist_ok=True)
+        temp = path.with_suffix('.download')
+        urllib.request.urlretrieve(url,temp)
+        temp.replace(path)
+    with path.open('rb') as f:
+        actual=hashlib.file_digest(f,'sha256').hexdigest()
+    if actual != digest:
+        raise ValueError(f'{path}: incorrect SHA-256 {actual}')
+    return path
+
+
+def exchange(proc, folder, model, feeds, expected, cache_names=None, *, predictions=True, atol=1e-4, rtol=1e-4):
+    inputs={}
+    for i,(name,data) in enumerate(feeds.items()):
+        if cache_names and name in cache_names:
+            inputs[name]=cache_names[name]
+        else:
+            path=folder/f'feed-{i}.bin'
+            data.tofile(path)
+            inputs[name]={'file':str(path),'shape':list(data.shape),'dtype':str(data.dtype)}
+    proc.stdin.write(json.dumps({'model':str(model),'directory':str(folder),'feeds':inputs})+'\n')
+    proc.stdin.flush()
+    line=proc.stdout.readline()
+    if not line: raise RuntimeError(f'Dart process exited with {proc.poll()}')
+    reply=json.loads(line)
+    if 'error' in reply: raise RuntimeError(f"{reply['error']}\n{reply['trace']}")
+    assert reply['outputs'].keys()==expected.keys()
+    worst=0.
+    for name,ref in expected.items():
+        result=reply['outputs'][name]
+        assert result['dtype']==str(ref.dtype), (name,result['dtype'],ref.dtype)
+        assert result['shape']==list(ref.shape), (name,result['shape'],ref.shape)
+        actual=np.fromfile(result['file'],dtype=ref.dtype).reshape(ref.shape)
+        if ref.dtype.kind in 'biu':
+            np.testing.assert_array_equal(actual,ref,err_msg=name)
+        else:
+            np.testing.assert_allclose(actual,ref,rtol=rtol,atol=atol,err_msg=name)
+        if predictions and (name=='logits' or len(expected)==1):
+            np.testing.assert_array_equal(actual.argmax(axis=-1),ref.argmax(axis=-1))
+        if ref.dtype.kind=='f':
+            worst=max(worst,float(np.max(np.abs(actual-ref),initial=0)))
+    return worst
+
+
+def verify(name,model,binary,folder):
+    opts=ort.SessionOptions()
+    opts.intra_op_num_threads=2
+    opts.inter_op_num_threads=1
+    opts.graph_optimization_level=ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    opts.add_session_config_entry('session.disable_prepacking','1')
+    session=ort.InferenceSession(str(model),opts,providers=['CPUExecutionProvider'])
+    keys=[out.name for out in session.get_outputs()]
+    if name.startswith('qwen'):
+        tokens=np.array([[9707,11,1879]],dtype=np.int64)
+        feeds={'input_ids':tokens,'position_ids':np.arange(3,dtype=np.int64)[None,:],
+               'attention_mask':np.ones((1,3),dtype=np.int64)}
+        for inp in session.get_inputs():
+            if inp.name.startswith('past_key_values'):
+                feeds[inp.name]=np.zeros((1,2,0,64),dtype=np.float32)
+        cases=[]
+        for step in range(3):
+            refs=dict(zip(keys,session.run(None,feeds)))
+            sources={k:k.replace('past_key_values','present') for k in feeds if k.startswith('past_key_values')}
+            cases.append((feeds,refs,sources if step else None))
+            feeds={k:refs[v] for k,v in sources.items()}
+            feeds.update(input_ids=refs['logits'][:,-1,:].argmax(-1).astype(np.int64)[:,None],
+                         position_ids=np.array([[3+step]],dtype=np.int64),
+                         attention_mask=np.ones((1,4+step),dtype=np.int64))
+    else:
+        inp=session.get_inputs()[0]
+        feeds={inp.name:np.random.default_rng(2026).normal(size=inp.shape).astype(np.float32)}
+        cases=[(feeds,dict(zip(keys,session.run(None,feeds))),None)]
+    del session
+    gc.collect()
+    with subprocess.Popen([str(binary)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True) as proc:
+        try:
+            for i,(feeds,expected,cache_names) in enumerate(cases):
+                err=exchange(proc,folder,model,feeds,expected,cache_names,atol=5e-4 if name.startswith("qwen") else 1e-4)
+                print(f'{name} step {i+1}: {len(expected)} output(s), max absolute error {err:.8g}',flush=True)
+        finally: proc.stdin.close()
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('models',nargs='+',choices=[*MODELS,'qwen','qwen_q4'])
+    parser.add_argument('--cache',type=Path,required=True)
+    parser.add_argument('--runner',type=Path,help='Previously compiled tool/compare_runner.dart')
+    args=parser.parse_args()
+    with tempfile.TemporaryDirectory() as tmp:
+        folder=Path(tmp)
+        binary=args.runner.resolve() if args.runner else folder/'compare'
+        if not args.runner:
+            subprocess.run(['dart','compile','exe','tool/compare_runner.dart','-o',str(binary)],check=True)
+        for name in args.models:
+            verify(name,obtain(name,args.cache.resolve()),binary,folder)
+
+
+if __name__=='__main__':
+    main()

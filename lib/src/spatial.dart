@@ -59,6 +59,9 @@ Tensor _spatial(_Node n, List<Tensor?> args) {
 
   final oh = outputDim(height, 0), ow = outputDim(width, 1);
   final kh = kernel[0], kw = kernel[1], perGroup = channels ~/ group;
+  final source = x.values as Float32List;
+  final weights = w?.values as Float32List?;
+  final includePad = n.integer('count_include_pad', 0) != 0;
   final maxPool = n.op == 'MaxPool';
   return _float([batch, outChannels, oh, ow], (flat) {
     final ox = flat % ow,
@@ -78,18 +81,18 @@ Tensor _spatial(_Node n, List<Tensor?> args) {
         for (var kx = 0; kx < kw; kx++) {
           final xx = x0 + kx * dil[1];
           if (y < 0 || xx < 0 || y >= height || xx >= width) {
-            if (n.integer('count_include_pad', 0) != 0 &&
+            if (includePad &&
                 y >= -pads[0] &&
                 xx >= -pads[1] &&
                 y < height + pads[2] &&
                 xx < width + pads[3]) count++;
             continue;
           }
-          final v = x.values[
+          final v = source[
                   ((sample * channels + start + c) * height + y) * width + xx]
               .toDouble();
-          if (w != null) {
-            acc += v * w.values[((oc * depth + c) * kh + ky) * kw + kx];
+          if (weights != null) {
+            acc += v * weights[((oc * depth + c) * kh + ky) * kw + kx];
           } else {
             acc = maxPool ? math.max(acc, v) : acc + v;
             count++;

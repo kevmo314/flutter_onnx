@@ -50,21 +50,15 @@ For CPU-only use, install the core package with `flutter pub add flutter_onnx --
 | Android | Android Neural Networks API | On API 29+ a supported GPU or accelerator executes a fully connected operation. Other Android devices use Dart. NNAPI was deprecated in Android 15 and availability varies by driver. |
 | iOS | Metal Performance Shaders | A Metal command queue executes MPSMatrixMultiplication on compatible devices. The plugin targets iOS 13+. |
 
-`runAsync` offloads nonempty rank-two FLOAT `MatMul` and the matrix product in `Gemm`. Transposition, scaling, bias and all other operators run in Dart. When a device declines a product, the scheduler computes it on the CPU. Pass `onAccelerated: (node) => print(node)` to observe successful dispatches. Transfers, weight transposition and compilation can outweigh device computation for small or frequently repeated products. The implementations currently transfer buffers per call.
+`runAsync` offloads nonempty FLOAT `MatMul` with shared rank-two weights and the matrix product in `Gemm`. Transposition, scaling, bias and all other operators run in Dart. When a device declines a product, the scheduler computes it on the CPU. Pass `onAccelerated: (node) => print(node)` to observe successful dispatches. Transfers, weight transposition and compilation can outweigh device computation for small or frequently repeated products. The implementations currently transfer buffers per call.
 
 ## Model compatibility
 
-The loader accepts binary ONNX ModelProto, IR versions 7–10, default-domain opsets 13–17, and a topologically ordered dense inference graph. External weight files, model-local functions, quantized tensors, custom domains, control flow and training graphs are outside this release's coverage. Unsupported operators or attributes raise an error. The package implements a subset of the ONNX operator set.
+The compatibility target is the standard ONNX domain at **opset 28** (ONNX 1.23.2). Implementation is partial. The loader accepts binary graphs declaring opsets 13–28 and IR versions 3–14. A supported version number alone does not establish that all operators, types and attributes in a particular graph will execute.
 
-| Operations | Coverage |
-| --- | --- |
-| Arithmetic | Add, Sub, Mul, Div with multidirectional broadcasting |
-| Pointwise | Relu, LeakyRelu, Sigmoid, Tanh, Abs, Neg, Exp, Log, Sqrt |
-| Linear algebra | MatMul including vectors and broadcast batches, Gemm including optional bias and transpose flags, Softmax along a chosen axis |
-| Data movement | Identity, tensor-valued Constant, Concat, Flatten, Reshape, Transpose |
-| Neural networks | Grouped 2-D NCHW Conv, 2-D AveragePool and MaxPool (values output), GlobalAveragePool, inference-mode BatchNormalization |
+The [verification report](VERIFICATION.md) records upstream node-test coverage and actual model results. The runtime includes NCHW convolution, grouped convolution, pooling, matrix products, broadcasting, indexing, reductions, quantization, normalization, rotary embeddings and grouped-query attention with caches. It also implements the four-bit `com.microsoft::MatMulNBits` block format used by the tested Qwen export. Initializers can contain inline raw bytes or protobuf values. External weights, sequences and model-local functions remain compatibility gaps.
 
-Arithmetic kernels use FLOAT (float32). Data movement also supports INT64, restricted to integers in the range −(2⁵³−1) through 2⁵³−1 for consistent web behavior. Initializers may use embedded little-endian raw data or protobuf repeated values. Pooling and convolution support explicit pads, VALID, SAME_UPPER and SAME_LOWER. The CPU implementation is synchronous and runs on the calling isolate.
+CPU inference is synchronous. Mobile devices and browsers impose different memory limits. The model comparisons use the native Dart CPU engine. Platform integration tests use a small bundled graph. The WebGPU test requires a real compute dispatch on a software adapter.
 
 ## Run the example and tests
 

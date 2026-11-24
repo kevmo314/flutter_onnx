@@ -54,25 +54,18 @@ class OnnxSession {
     try {
       final model = _Proto(bytes);
       final ir = model.integer(1);
-      if (ir < 7 || ir > 10)
-        throw UnsupportedError('ONNX IR $ir (supported: 7–10)');
+      if (ir < 3 || ir > 14)
+        throw UnsupportedError('ONNX IR $ir (supported: 3–14)');
       final imports =
           model.messages(8).where((m) => m.string(1).isEmpty).toList();
       if (imports.length != 1)
         throw const FormatException('Expected one default-domain opset import');
       final version = imports.single.integer(2);
-      if (version < 13 || version > 17)
-        throw UnsupportedError('ONNX opset $version (supported: 13–17)');
+      if (version < 13 || version > 28)
+        throw UnsupportedError('ONNX opset $version (supported: 13–28)');
       if (model.has(25)) throw UnsupportedError('Model-local functions');
       final graph = model.message(7);
       if (graph.has(15)) throw UnsupportedError('Sparse initializers');
-      final weights = <String, Tensor>{};
-      for (final t in graph.messages(5)) {
-        final name = t.string(8);
-        if (name.isEmpty || weights.containsKey(name))
-          throw FormatException('Invalid initializer name "$name"');
-        weights[name] = _tensor(t);
-      }
       Map<String, TensorInfo> interface(int field) {
         final result = <String, TensorInfo>{};
         for (final value in graph.messages(field)) {
@@ -86,19 +79,39 @@ class OnnxSession {
 
       final inputs = interface(11);
       final outputs = interface(12);
+      final nodes =
+          graph.messages(1).map((p) => _Node.read(p, version)).toList();
+      final sliceBounds = <String>{};
+      final otherUses = {...inputs.keys, ...outputs.keys};
+      for (final n in nodes) {
+        for (final (i, name) in n.inputs.indexed) {
+          if (n.op == 'Slice' && (i == 1 || i == 2)) {
+            sliceBounds.add(name);
+          } else {
+            otherUses.add(name);
+          }
+        }
+      }
+      sliceBounds.removeAll(otherUses);
+      final weights = <String, Tensor>{};
+      for (final t in graph.messages(5)) {
+        final name = t.string(8);
+        if (name.isEmpty || weights.containsKey(name))
+          throw FormatException('Invalid initializer name "$name"');
+        weights[name] = _tensor(t, sliceBound: sliceBounds.contains(name));
+      }
       final known = {...inputs.keys, ...weights.keys};
       final uses = <String, int>{};
-      final nodes = <_Node>[];
-      for (final p in graph.messages(1)) {
-        final node = _Node.read(p, version);
+      for (final node in nodes) {
         for (final name in node.inputs.where((n) => n.isNotEmpty)) {
           if (!known.contains(name))
             throw FormatException('${node.label}: unknown input $name');
           uses.update(name, (v) => v + 1, ifAbsent: () => 1);
         }
-        if (!known.add(node.output))
-          throw FormatException('Duplicate graph value ${node.output}');
-        nodes.add(node);
+        for (final name in node.outputs.where((v) => v.isNotEmpty)) {
+          if (!known.add(name))
+            throw FormatException('Duplicate graph value $name');
+        }
       }
       for (final name in outputs.keys) {
         if (!known.contains(name))
@@ -113,7 +126,7 @@ class OnnxSession {
   Map<String, Tensor> run(Map<String, Tensor> feeds) {
     final frame = _Frame(this, feeds);
     for (final node in _nodes) {
-      frame.store(node, _execute(node, frame.args(node)));
+      frame.store(node, _executeNode(node, frame.args(node)));
     }
     return frame.results();
   }
@@ -129,7 +142,7 @@ class OnnxSession {
       final args = frame.args(node);
       final product = await _tryAccelerate(node, args, backend);
       if (product != null) onAccelerated?.call(node.label);
-      frame.store(node, product ?? _execute(node, args));
+      frame.store(node, product == null ? _executeNode(node, args) : [product]);
     }
     return frame.results();
   }
@@ -148,9 +161,18 @@ Future<Tensor?> _tryAccelerate(
     _Node node, List<Tensor?> args, MatMulBackend backend) async {
   if (node.op != 'MatMul' && node.op != 'Gemm') return null;
   var a = args[0]!, b = args[1]!;
-  if ([a, b].any((v) =>
-      v.type != TensorType.float32 || v.shape.length != 2 || v.values.isEmpty))
-    return null;
+  if (a.type != TensorType.float32 ||
+      b.type != TensorType.float32 ||
+      a.values.isEmpty ||
+      b.values.isEmpty ||
+      b.shape.length != 2 ||
+      a.shape.length < 2) return null;
+  List<int>? restoredShape;
+  if (a.shape.length > 2) {
+    if (node.op != 'MatMul') return null;
+    restoredShape = [...a.shape.take(a.shape.length - 1), b.shape.last];
+    a = a._reshape([a.values.length ~/ a.shape.last, a.shape.last]);
+  }
   if (node.integer('transA', 0) != 0) a = _transpose(a, [1, 0]);
   if (node.integer('transB', 0) != 0) b = _transpose(b, [1, 0]);
   _require(a.shape[1] == b.shape[0], 'Matrix inner dimensions differ');
@@ -168,7 +190,8 @@ Future<Tensor?> _tryAccelerate(
     throw StateError('${backend.name} returned an incorrect matrix length');
   final alpha = node.real('alpha', 1), beta = node.real('beta', 1);
   if (alpha == 1 && (bias == null || beta == 0))
-    return Tensor._(TensorType.float32, shape, data.asUnmodifiableView());
+    return Tensor._(
+        TensorType.float32, restoredShape ?? shape, data.asUnmodifiableView());
   return _float(
       shape,
       (i) =>
@@ -197,9 +220,12 @@ class _Frame {
   }
 
   List<Tensor?> args(_Node n) => n.inputs.map((key) => values[key]).toList();
-  void store(_Node n, Tensor value) {
-    if (remaining.containsKey(n.output) ||
-        session.outputs.containsKey(n.output)) values[n.output] = value;
+  void store(_Node n, List<Tensor> outputs) {
+    for (final (i, key) in n.outputs.indexed) {
+      if (key.isNotEmpty &&
+          (remaining.containsKey(key) || session.outputs.containsKey(key)))
+        values[key] = outputs[i];
+    }
     for (final k in n.inputs.where((s) => s.isNotEmpty)) {
       if ((remaining[k] = remaining[k]! - 1) == 0 &&
           !session.outputs.containsKey(k)) values.remove(k);
@@ -218,22 +244,35 @@ class _Frame {
 }
 
 class _Node {
-  final String op, label, output;
+  final String op, label;
+  final List<String> outputs;
   final List<String> inputs;
   final Map<String, Object> attrs;
-  _Node(this.op, this.label, this.output, this.inputs, this.attrs);
+  _Node(this.op, this.label, this.outputs, this.inputs, this.attrs);
 
   factory _Node.read(_Proto p, int opset) {
-    final op = p.string(4);
+    final domain = p.string(7);
+    final op = domain.isEmpty ? p.string(4) : '$domain::${p.string(4)}';
     final name = p.string(3);
     final label = name.isEmpty ? op : '$name ($op)';
     final schema = _schemas[op];
-    if (p.string(7).isNotEmpty || schema == null)
+    if (schema == null)
       throw UnsupportedError('$label: unsupported operator domain or type');
     final outs = p.strings(2);
     if (outs.isEmpty ||
         outs.first.isEmpty ||
-        outs.skip(1).any((s) => s.isNotEmpty))
+        (!const {
+              'Attention',
+              'RMSNormalization',
+              'LayerNormalization',
+              'Split',
+              'TopK',
+              'Dropout',
+              'CausalConvWithState',
+              'LinearAttention',
+              'DynamicQuantizeLinear'
+            }.contains(op) &&
+            outs.skip(1).any((s) => s.isNotEmpty)))
       throw UnsupportedError('$label: requires one output');
     final ins = p.strings(1);
     if (ins.length < schema.$1 ||
@@ -261,7 +300,7 @@ class _Node {
         _ => throw UnsupportedError('$label: attribute $key'),
       };
     }
-    return _Node(op, label, outs.first, ins, attrs);
+    return _Node(op, label, outs, ins, attrs);
   }
   int integer(String name, int fallback) => attrs[name] as int? ?? fallback;
   double real(String name, double fallback) =>
@@ -271,6 +310,182 @@ class _Node {
 
 // (required input count, maximum input count, AttributeProto types).
 const _schemas = <String, (int, int, Map<String, int>)>{
+  'Attention': (
+    3,
+    7,
+    {
+      'q_num_heads': 2,
+      'kv_num_heads': 2,
+      'is_causal': 2,
+      'scale': 1,
+      'softcap': 1,
+      'softmax_precision': 2,
+      'qk_matmul_output_mode': 2,
+      'left_window_size': 2,
+      'right_window_size': 2
+    }
+  ),
+  'RMSNormalization': (2, 2, {'axis': 2, 'epsilon': 1, 'stash_type': 2}),
+  'LayerNormalization': (2, 3, {'axis': 2, 'epsilon': 1, 'stash_type': 2}),
+  'RotaryEmbedding': (
+    3,
+    4,
+    {'num_heads': 2, 'rotary_embedding_dim': 2, 'interleaved': 2}
+  ),
+  'Gelu': (1, 1, {'approximate': 3}),
+  'Erf': (1, 1, {}),
+  'SwiGLU': (2, 2, {'alpha': 1}),
+  'Split': (1, 2, {'axis': 2, 'num_outputs': 2}),
+  'ArgMax': (1, 1, {'axis': 2, 'keepdims': 2, 'select_last_index': 2}),
+  'ArgMin': (1, 1, {'axis': 2, 'keepdims': 2, 'select_last_index': 2}),
+  'TopK': (2, 2, {'axis': 2, 'largest': 2, 'sorted': 2}),
+  'Dropout': (1, 3, {'seed': 2}),
+  'com.microsoft::MatMulNBits': (
+    3,
+    4,
+    {'K': 2, 'N': 2, 'bits': 2, 'block_size': 2, 'accuracy_level': 2}
+  ),
+  'CastLike': (2, 2, {'saturate': 2, 'round_mode': 3}),
+  'BitCast': (1, 1, {'to': 2}),
+  'BitwiseNot': (1, 1, {}),
+  'BitShift': (2, 2, {'direction': 3}),
+  'BitwiseAnd': (2, 2, {}),
+  'BitwiseOr': (2, 2, {}),
+  'BitwiseXor': (2, 2, {}),
+  'Mod': (2, 2, {'fmod': 2}),
+  'IsInf': (1, 1, {'detect_negative': 2, 'detect_positive': 2}),
+  'CumSum': (2, 2, {'exclusive': 2, 'reverse': 2}),
+  'CumProd': (2, 2, {'exclusive': 2, 'reverse': 2}),
+  'EyeLike': (1, 1, {'dtype': 2, 'k': 2}),
+  'GatherND': (2, 2, {'batch_dims': 2}),
+  'Compress': (2, 2, {'axis': 2}),
+  'NonZero': (1, 1, {}),
+  'OneHot': (3, 3, {'axis': 2}),
+  'ReverseSequence': (2, 2, {'time_axis': 2, 'batch_axis': 2}),
+  'DepthToSpace': (1, 1, {'blocksize': 2, 'mode': 3}),
+  'SpaceToDepth': (1, 1, {'blocksize': 2}),
+  'Pad': (2, 4, {'mode': 3}),
+  'CenterCropPad': (2, 2, {'axes': 7}),
+  'Scatter': (3, 3, {'axis': 2, 'reduction': 3}),
+  'ScatterElements': (3, 3, {'axis': 2, 'reduction': 3}),
+  'HannWindow': (1, 1, {'periodic': 2, 'output_datatype': 2}),
+  'HammingWindow': (1, 1, {'periodic': 2, 'output_datatype': 2}),
+  'BlackmanWindow': (1, 1, {'periodic': 2, 'output_datatype': 2}),
+  'Shrink': (1, 1, {'bias': 1, 'lambd': 1}),
+  'Hardmax': (1, 1, {'axis': 2}),
+  'GlobalMaxPool': (1, 1, {}),
+  'GlobalLpPool': (1, 1, {'axis': 2, 'p': 2}),
+  'LpNormalization': (1, 1, {'axis': 2, 'p': 2}),
+  'InstanceNormalization': (3, 3, {'epsilon': 1}),
+  'GroupNormalization': (
+    3,
+    3,
+    {'num_groups': 2, 'epsilon': 1, 'stash_type': 2}
+  ),
+  'MeanVarianceNormalization': (1, 1, {'axes': 7}),
+  'LRN': (1, 1, {'alpha': 1, 'beta': 1, 'bias': 1, 'size': 2}),
+  'Det': (1, 1, {}),
+  'MatMulInteger': (2, 4, {}),
+  'QLinearMatMul': (8, 8, {}),
+  'QuantizeLinear': (
+    2,
+    3,
+    {
+      'axis': 2,
+      'saturate': 2,
+      'block_size': 2,
+      'output_dtype': 2,
+      'precision': 2
+    }
+  ),
+  'DequantizeLinear': (
+    2,
+    3,
+    {
+      'axis': 2,
+      'saturate': 2,
+      'block_size': 2,
+      'output_dtype': 2,
+      'precision': 2
+    }
+  ),
+  'DynamicQuantizeLinear': (1, 1, {}),
+  'Clip': (1, 3, {}),
+  'HardSigmoid': (1, 1, {'alpha': 1, 'beta': 1}),
+  'HardSwish': (1, 1, {}),
+  'Reciprocal': (1, 1, {}),
+  'Floor': (1, 1, {}),
+  'Ceil': (1, 1, {}),
+  'Round': (1, 1, {}),
+  'Cos': (1, 1, {}),
+  'Sin': (1, 1, {}),
+  'Tan': (1, 1, {}),
+  'Acos': (1, 1, {}),
+  'Asin': (1, 1, {}),
+  'Atan': (1, 1, {}),
+  'Cosh': (1, 1, {}),
+  'Sinh': (1, 1, {}),
+  'Acosh': (1, 1, {}),
+  'Asinh': (1, 1, {}),
+  'Atanh': (1, 1, {}),
+  'Sign': (1, 1, {}),
+  'Softsign': (1, 1, {}),
+  'Softplus': (1, 1, {}),
+  'IsNaN': (1, 1, {}),
+  'Not': (1, 1, {}),
+  'Elu': (1, 1, {'alpha': 1}),
+  'Celu': (1, 1, {'alpha': 1}),
+  'ThresholdedRelu': (1, 1, {'alpha': 1}),
+  'Swish': (1, 1, {'alpha': 1}),
+  'Selu': (1, 1, {'alpha': 1, 'gamma': 1}),
+  'Pow': (2, 2, {}),
+  'Equal': (2, 2, {}),
+  'Greater': (2, 2, {}),
+  'GreaterOrEqual': (2, 2, {}),
+  'Less': (2, 2, {}),
+  'LessOrEqual': (2, 2, {}),
+  'And': (2, 2, {}),
+  'Or': (2, 2, {}),
+  'Xor': (2, 2, {}),
+  'PRelu': (2, 2, {}),
+  'Sum': (1, 2147483647, {}),
+  'Mean': (1, 2147483647, {}),
+  'Min': (1, 2147483647, {}),
+  'Max': (1, 2147483647, {}),
+  'Shape': (1, 1, {'start': 2, 'end': 2}),
+  'Size': (1, 1, {}),
+  'Gather': (2, 2, {'axis': 2}),
+  'GatherElements': (2, 2, {'axis': 2}),
+  'Expand': (2, 2, {}),
+  'Tile': (2, 2, {}),
+  'Where': (3, 3, {}),
+  'Range': (3, 3, {}),
+  'Squeeze': (1, 2, {}),
+  'Unsqueeze': (2, 2, {}),
+  'Cast': (1, 1, {'to': 2, 'saturate': 2}),
+  'ConstantOfShape': (1, 1, {'value': 4}),
+  'ScatterND': (3, 3, {'reduction': 3}),
+  'Slice': (3, 5, {}),
+  'Trilu': (1, 2, {'upper': 2}),
+  'ReduceMean': (1, 2, {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}),
+  'ReduceSum': (1, 2, {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}),
+  'ReduceMax': (1, 2, {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}),
+  'ReduceMin': (1, 2, {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}),
+  'ReduceProd': (1, 2, {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}),
+  'ReduceL1': (1, 2, {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}),
+  'ReduceL2': (1, 2, {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}),
+  'ReduceLogSum': (1, 2, {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}),
+  'ReduceLogSumExp': (
+    1,
+    2,
+    {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}
+  ),
+  'ReduceSumSquare': (
+    1,
+    2,
+    {'axes': 7, 'keepdims': 2, 'noop_with_empty_axes': 2}
+  ),
+  'LogSoftmax': (1, 1, {'axis': 2}),
   'Identity': (1, 1, {}),
   'Relu': (1, 1, {}),
   'Sigmoid': (1, 1, {}),

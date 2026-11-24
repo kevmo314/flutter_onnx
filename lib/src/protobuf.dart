@@ -98,43 +98,40 @@ class _Proto {
   }
 }
 
-Tensor _tensor(_Proto p) {
+Tensor _tensor(_Proto p, {bool sliceBound = false}) {
   if (p.has(3) || p.has(13) || (p.has(14) && p.integer(14) != 0)) {
     throw UnsupportedError('External or segmented tensor data');
   }
   final shape = p.ints(1).toList();
-  final count = _size(shape);
   final type = _type(p.integer(2));
-  if (p.has(9)) {
-    final data = ByteData.sublistView(p.bytes(9));
-    final width = type == TensorType.float32 ? 4 : 8;
-    if (data.lengthInBytes != count * width)
-      throw const FormatException('Incorrect raw_data length');
-    if (type == TensorType.float32)
-      return _float(shape, (i) => data.getFloat32(i * 4, Endian.little));
-    return Tensor.int64(
-        shape,
-        List.generate(count, (i) {
-          final lo = data.getUint32(i * 8, Endian.little);
-          final hi = data.getInt32(i * 8 + 4, Endian.little);
-          return _portableInt((BigInt.from(hi) << 32) + BigInt.from(lo));
-        }));
+  if (p.has(9))
+    return _decodeRaw(type, shape, p.bytes(9), sliceBound: sliceBound);
+  if (type == TensorType.int64 ||
+      type == TensorType.uint64 ||
+      type == TensorType.uint32) {
+    return Tensor.fromValues(
+        type, shape, p.ints(type == TensorType.int64 ? 7 : 11));
   }
-  if (type == TensorType.int64) return Tensor.int64(shape, p.ints(7));
-  final numbers = <double>[];
-  for (final chunk in p.all(4)) {
-    final data = ByteData.sublistView(chunk as Uint8List);
-    if (data.lengthInBytes % 4 != 0)
-      throw const FormatException('Invalid float_data length');
-    for (var i = 0; i < data.lengthInBytes; i += 4) {
-      numbers.add(data.getFloat32(i, Endian.little));
+  if (type == TensorType.float16 || type == TensorType.bfloat16) {
+    final store = ByteData(4);
+    return Tensor.fromValues(
+        type, shape, p.ints(5).map((v) => _decodeHalf(v, type, store)));
+  }
+  if (!type.floating) return Tensor.fromValues(type, shape, p.ints(5));
+  final values = <double>[];
+  for (final chunk in p.all(type == TensorType.float32 ? 4 : 10)) {
+    final data = ByteData.sublistView(chunk as Uint8List),
+        width = type.bytesPerElement;
+    if (data.lengthInBytes % width != 0)
+      throw const FormatException('Misaligned typed tensor values');
+    for (var i = 0; i < data.lengthInBytes; i += width) {
+      values.add(width == 4
+          ? data.getFloat32(i, Endian.little)
+          : data.getFloat64(i, Endian.little));
     }
   }
-  return Tensor.float32(shape, numbers);
+  return Tensor.fromValues(type, shape, values);
 }
 
-TensorType _type(int id) => switch (id) {
-      1 => TensorType.float32,
-      7 => TensorType.int64,
-      _ => throw UnsupportedError('ONNX tensor element type $id'),
-    };
+TensorType _type(int id) => TensorType.values.firstWhere((t) => t.onnxId == id,
+    orElse: () => throw UnsupportedError('ONNX tensor element type $id'));
