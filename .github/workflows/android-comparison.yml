@@ -1,5 +1,5 @@
 name: Compare Android playback on one emulator
-on: [push, workflow_dispatch]
+on: [workflow_dispatch]
 permissions:
   contents: read
 jobs:

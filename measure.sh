@@ -24,6 +24,25 @@ if [[ "$1" == android ]]; then
     adb -s "$device" shell chown -R "$uid:$uid" "$dir"
     adb -s "$device" shell restorecon -RF "$dir"
   fi
+  # Record runnable CPU time during boot, then give each engine the same
+  # quiet-start criterion before measuring its first model load and utterance.
+  python3 - <<'PY'
+import subprocess, time
+def sample():
+    t = list(map(int, subprocess.check_output(["adb","shell","head","-1","/proc/stat"], text=True).split()[1:9]))
+    return sum(t), t[3] + t[4]
+last = sample()
+quiet = 0
+for i in range(60):
+    time.sleep(5)
+    current = sample()
+    idle = (current[1] - last[1]) / max(1, current[0] - last[0])
+    last = current
+    print(f"Guest CPU idle {idle:.0%}", flush=True)
+    quiet = quiet + 1 if idle >= 0.75 else 0
+    if quiet >= 3:
+        break
+PY
   adb -s "$device" shell am start -n "$app/.MainActivity"
   read_report() { adb -s "$device" shell "${owner[@]}" cat "$dir/playback.jsonl" 2>/dev/null | tr -d '\r'; }
   logs() { adb logcat -d -t 1200 > "$RUNNER_TEMP/device.log"; }
@@ -46,6 +65,13 @@ for (( attempt=0; attempt<180; ++attempt )); do
   if grep -q '"error":' "$RUNNER_TEMP/playback.jsonl"; then cat "$RUNNER_TEMP/playback.jsonl"; exit 1; fi
   if grep -q '"complete":true' "$RUNNER_TEMP/playback.jsonl"; then
     cat "$RUNNER_TEMP/playback.jsonl" | tee -a "$GITHUB_STEP_SUMMARY"
+    python3 - "$RUNNER_TEMP/playback.jsonl" <<'PYTHON'
+import json, sys
+with open(sys.argv[1]) as f:
+    rows = [r for line in f if "rtf" in (r := json.loads(line))]
+if len(rows) != 3 or any(not 0 < r["rtf"] < 1 for r in rows):
+    raise SystemExit(f"Missed the real-time synthesis budget: {rows}")
+PYTHON
     exit 0
   fi
   if (( attempt % 6 == 0 )); then cat "$RUNNER_TEMP/playback.jsonl"; fi
