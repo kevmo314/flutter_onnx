@@ -79,6 +79,8 @@ class OnnxSession {
   final Map<String, Tensor> _weights;
   final List<_Node> _nodes;
   final Map<String, int> _uses;
+  late final List<_Node> _pointwiseNodes =
+      _fusePointwiseGelu(_nodes, outputs, _uses);
   final Set<String> _captures;
   OnnxSession._(this.opset, this.inputs, this.outputs, this._weights,
       this._nodes, this._uses, this._captures);
@@ -206,17 +208,28 @@ class OnnxSession {
       void Function(String node)? onAccelerated}) async {
     if (backend == null) return run(feeds);
     final frame = _Frame(this, feeds, {});
-    for (final node in _nodes) {
+    final plan = backend is PointwiseConvBackend ? _pointwiseNodes : _nodes;
+    for (final node in plan) {
       final args = frame.args(node);
       final product = (node.op == 'MatMul' ||
               node.op == 'Gemm' ||
               node.op == _rowProduct ||
-              node.op == 'Conv')
+              node.op == 'Conv' ||
+              node.op == _pointwiseGelu)
           ? await _tryAccelerate(node, args.cast<Tensor?>(), backend)
           : null;
       if (product != null) onAccelerated?.call(node.label);
-      frame.store(node,
-          product == null ? _valueNode(node, args, frame.values) : [product]);
+      if (product != null) {
+        frame.store(node, [product]);
+      } else if (node.op == _pointwiseGelu) {
+        final conv =
+            _Node('Conv', node.label, node.outputs, node.inputs, node.attrs);
+        frame.store(node, [
+          _expandedGeluTensor(_executeNode(conv, args.cast<Tensor?>()).single)
+        ]);
+      } else {
+        frame.store(node, _valueNode(node, args, frame.values));
+      }
     }
     return frame.results().cast<String, Tensor>();
   }
@@ -231,9 +244,47 @@ abstract interface class MatMulBackend {
   Future<void> close();
 }
 
+/// Optional native kernel for dense unit-stride pointwise NCL convolutions.
+/// Weights and bias are immutable. The GELU form includes the float32 rounding
+/// of the exported Div, Erf, Add and two Mul operations.
+abstract interface class PointwiseConvBackend implements MatMulBackend {
+  Future<Float32List?> pointwise(Tensor input, Tensor weights, Tensor? bias,
+      {required bool gelu});
+}
+
+const _pointwiseGelu = '#PointwiseGelu';
+
+List<_Node> _fusePointwiseGelu(
+    List<_Node> nodes, Map<String, TensorInfo> outputs, Map<String, int> uses) {
+  final convs = <String, _Node>{};
+  final replacements = <_Node, _Node>{}, removed = <_Node>{};
+  for (final n in nodes) {
+    if (n.op == 'Conv' &&
+        n.function == null &&
+        n.outputs.length == 1 &&
+        uses[n.outputs.single] == 1 &&
+        !outputs.containsKey(n.outputs.single)) {
+      convs[n.outputs.single] = n;
+    } else if (n.op == _expandedGelu) {
+      final conv = convs[n.inputs.single];
+      if (conv != null) {
+        replacements[n] = _Node(
+            _pointwiseGelu, conv.label, n.outputs, conv.inputs, conv.attrs);
+        removed.add(conv);
+      }
+    }
+  }
+  return [
+    for (final n in nodes)
+      if (!removed.contains(n)) replacements[n] ?? n
+  ];
+}
+
 Future<Tensor?> _tryAccelerate(
     _Node node, List<Tensor?> args, MatMulBackend backend) async {
-  if (node.op == 'Conv') return _accelerateConv1d(node, args, backend);
+  if (node.op == 'Conv' || node.op == _pointwiseGelu) {
+    return _accelerateConv1d(node, args, backend);
+  }
   if (node.op == _rowProduct) {
     final input = args[0]!, weights = args[1]!;
     final dims = _rowProductShape(input, weights);
@@ -569,8 +620,15 @@ List<_Node> _fuseGelu(
           !outputs.containsKey(n.outputs.single))
         n.outputs.single: n,
   };
+  final constants = <String, Tensor>{
+    for (final n in nodes)
+      if (n.op == 'Constant' &&
+          n.function == null &&
+          n.attrs['value'] is Tensor)
+        n.outputs.single: n.attrs['value'] as Tensor,
+  };
   bool scalar(String name, double value) {
-    final w = weights[name];
+    final w = weights[name] ?? constants[name];
     return w != null &&
         w.type == TensorType.float32 &&
         w.shape.isEmpty &&

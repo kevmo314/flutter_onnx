@@ -210,11 +210,23 @@ Future<Tensor?> _accelerateConv1d(
   final columns = win.output.single, inner = channels * taps;
   if (batch == 0 || filters == 0 || inner == 0 || columns == 0) return null;
   final source = x.values as Float32List, weights = w.values as Float32List;
-  final result = Float32List(_size([batch, filters, columns]));
   final direct = taps == 1 &&
       win.stride.single == 1 &&
       win.pads.first == 0 &&
       columns == width;
+  final gelu = node.op == _pointwiseGelu;
+  if (direct && backend is PointwiseConvBackend) {
+    final data = await backend.pointwise(x, w, bias, gelu: gelu);
+    if (data != null) {
+      if (data.length != batch * filters * columns) {
+        throw StateError(
+            '${backend.name} returned an incorrect convolution length');
+      }
+      return Tensor._(
+          x.type, [batch, filters, columns], data.asUnmodifiableView());
+    }
+  }
+  final result = Float32List(_size([batch, filters, columns]));
   // Cap the temporary lowering buffer. Wide inputs can use the direct kernel.
   if (!direct && inner * columns > 4 * 1024 * 1024) return null;
   for (var b = 0; b < batch; b++) {
@@ -254,8 +266,9 @@ Future<Tensor?> _accelerateConv1d(
       }
     }
   }
-  return Tensor._(
-      x.type, [batch, filters, columns], result.asUnmodifiableView());
+  final conv =
+      Tensor._(x.type, [batch, filters, columns], result.asUnmodifiableView());
+  return gelu ? _expandedGeluTensor(conv) : conv;
 }
 
 // NCL convolution accumulates a contiguous time span for each weight.

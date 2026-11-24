@@ -169,6 +169,17 @@ Tensor? _arrayOp(_Node n, List<Tensor?> args) {
       _require(x.type == TensorType.boolean && a.type == b.type,
           'Invalid Where types');
       final dims = _broadcastShape(shape, _broadcastShape(a.shape, b.shape));
+      // Padding masks are often uniform. Reuse the selected tensor whenever
+      // it already has the broadcast result shape.
+      if (x.length > 0 &&
+          (_sameShape(a.shape, dims) || _sameShape(b.shape, dims))) {
+        final yes = x.values.first != 0;
+        final selected = yes ? a : b;
+        if (_sameShape(selected.shape, dims) &&
+            x.values.every((v) => (v != 0) == yes)) {
+          return selected;
+        }
+      }
       final c = _IndexMap(shape, dims),
           ai = _IndexMap(a.shape, dims),
           bi = _IndexMap(b.shape, dims);
@@ -359,6 +370,28 @@ Tensor _slice(Tensor x, List<int> starts, List<int> ends, Tensor? ax,
     dims[a] = math.max(0, ((end - start) / step).ceil());
     base += start * strides[a];
     strides[a] *= step;
+  }
+  if (x.type == TensorType.float32 && axes.length == 1 && steps.single == 1) {
+    final axis = _axis(axes.single, dims.length);
+    final chunk = dims[axis] * strides[axis];
+    final source = x.values as Float32List;
+    final size = _size(dims);
+    if (size == 0)
+      return Tensor._(x.type, dims, Float32List(0).asUnmodifiableView());
+    if (chunk == size || dims[axis] == x.shape[axis]) {
+      return Tensor._(
+          x.type,
+          dims,
+          Float32List.sublistView(source, base, base + size)
+              .asUnmodifiableView());
+    }
+    final result = Float32List(size);
+    final pitch = x.shape[axis] * strides[axis];
+    for (var dest = 0; dest < size; dest += chunk) {
+      result.setRange(dest, dest + chunk, source, base);
+      base += pitch;
+    }
+    return Tensor._(x.type, dims, result.asUnmodifiableView());
   }
   final dest = _strides(dims);
   return _reorder(x, dims, (i) {

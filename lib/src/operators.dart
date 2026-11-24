@@ -406,6 +406,22 @@ Tensor _transpose(Tensor x, List<int>? perm) {
   }
   final src = _strides(x.shape), dst = _strides(shape);
   final steps = [for (final i in perm) src[i]];
+  if (x.type == TensorType.float32) {
+    // Copy innermost spans with a fixed stride. Unravel outer coordinates
+    // once per span instead of once per element.
+    final input = x.values as Float32List, output = Float32List(x.length);
+    final span = shape.last, step = steps.last;
+    for (var start = 0; start < output.length; start += span) {
+      var offset = 0;
+      for (var i = 0; i < rank - 1; i++) {
+        offset += start ~/ dst[i] % shape[i] * steps[i];
+      }
+      for (var j = 0; j < span; j++) {
+        output[start + j] = input[offset + j * step];
+      }
+    }
+    return Tensor._(x.type, shape, output.asUnmodifiableView());
+  }
   return _reorder(x, shape, (flat) {
     var offset = 0;
     for (var i = 0; i < rank; i++) {

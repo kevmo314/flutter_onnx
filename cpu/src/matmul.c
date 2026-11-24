@@ -16,7 +16,7 @@
 enum { panel_depth = 192, tile_width = 16 };
 
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
-#define HAVE_AVX2_DISPATCH
+#define HAVE_AVX_DISPATCH
 #define INLINE __attribute__((always_inline)) inline
 #else
 #define INLINE inline
@@ -74,8 +74,8 @@ static INLINE void packed_product(const float *a, const float *b, float *c,
   }
 }
 
-#ifdef HAVE_AVX2_DISPATCH
-__attribute__((target("avx2"))) static void avx2_product(
+#ifdef HAVE_AVX_DISPATCH
+__attribute__((target("avx"))) static void avx_product(
     const float *a, const float *b, float *c, int rows, int k, int n) {
   packed_product(a, b, c, rows, k, n);
 }
@@ -92,9 +92,9 @@ EXPORT void onnx_cpu_sgemm(const float *a, const float *b, float *c,
   cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, rows, n, k,
               1.0f, a, k, b, n, 0.0f, c, n);
 #else
-#ifdef HAVE_AVX2_DISPATCH
-  if (__builtin_cpu_supports("avx2")) {
-    avx2_product(a, b, c, rows, k, n);
+#ifdef HAVE_AVX_DISPATCH
+  if (__builtin_cpu_supports("avx")) {
+    avx_product(a, b, c, rows, k, n);
     return;
   }
 #endif

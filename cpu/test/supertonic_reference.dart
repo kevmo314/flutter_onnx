@@ -168,6 +168,7 @@ Future<void> main(List<String> args) async {
           'first_pcm_us': first.inMicroseconds,
           'synthesis_us': produced.inMicroseconds,
           'audio_us': audio.inMicroseconds,
+          'rtf': produced.inMicroseconds / audio.inMicroseconds,
           'estimated_playback_end_us': finished.inMicroseconds,
           'estimated_starvation_us': (finished - first - audio).inMicroseconds,
         }),
