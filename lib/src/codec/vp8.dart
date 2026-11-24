@@ -892,7 +892,8 @@ class VP8 {
     return true;
   }
 
-  int _clip8(int v) => (v >> 6).clamp(0, 255);
+  // Clamp before shifting so negative intermediates also saturate on dart2js.
+  int _clip8(int v) => v.clamp(0, 255 << 6) >> 6;
   int _high(int v, int coefficient) => (v * coefficient) >> 8;
   int _yuvToR(int y, int v) =>
       _clip8(_high(y, 19077) + _high(v, 26149) - 14234);

@@ -187,20 +187,40 @@ Tensor _matmul(Tensor a, Tensor b,
   final ia = _IndexMap(ba, batches), ib = _IndexMap(bb, batches);
   final shape = [...batches, if (!av) m, if (!bv) n];
   final biasMap = bias == null ? null : _IndexMap(bias.shape, shape);
-  _require(a.type == b.type, 'Matrix operand types differ');
+  _require(a.type == b.type && (bias == null || bias.type == a.type),
+      'Matrix operand types differ');
   if (a.type != TensorType.float32) {
     if (!a.type.floating) {
       final wide = a.type == TensorType.int64 || a.type == TensorType.uint64;
       final left = wide ? a.bigIntValues : a.values.map(BigInt.from).toList();
       final right = wide ? b.bigIntValues : b.values.map(BigInt.from).toList();
       final signed = a.type == TensorType.int32 || a.type == TensorType.int64;
+      final offsets = bias == null || beta == 0
+          ? null
+          : wide
+              ? bias.bigIntValues
+              : bias.values.map(BigInt.from).toList();
+      // ONNX stores alpha and beta as binary32. Express their common
+      // denominator exactly so rounding to an integer happens only once.
+      var numeratorA = alpha, numeratorB = offsets == null ? 0.0 : beta;
+      _require(numeratorA.isFinite && numeratorB.isFinite,
+          'Integer Gemm requires finite coefficients');
+      var denominator = BigInt.one;
+      while (numeratorA != numeratorA.truncateToDouble() ||
+          numeratorB != numeratorB.truncateToDouble()) {
+        numeratorA *= 2;
+        numeratorB *= 2;
+        denominator <<= 1;
+      }
+      final scaleA = BigInt.from(numeratorA), scaleB = BigInt.from(numeratorB);
       final vals = List.generate(_size(shape), (i) {
         final batch = i ~/ (m * n), r = i ~/ n % m, c = i % n;
         final ai = ia.at(batch) * m * k + r * k, bi = ib.at(batch) * k * n + c;
         var sum = BigInt.zero;
         for (var t = 0; t < k; t++) sum += left[ai + t] * right[bi + t * n];
-        if (alpha != 1 || bias != null)
-          throw UnsupportedError('Scaled integer matrix product');
+        if (scaleA != BigInt.one) sum *= scaleA;
+        if (offsets != null) sum += scaleB * offsets[biasMap!.at(i)];
+        if (denominator != BigInt.one) sum ~/= denominator;
         return signed
             ? sum.toSigned(a.type.bitWidth)
             : sum.toUnsigned(a.type.bitWidth);

@@ -155,6 +155,20 @@ save(
     [info("scores", ["n", 3])],
     [h.make_tensor("weights", T.FLOAT, [3, 2], [1.0, -1.0, 2.0, 4.0, -3.0, 2.0])],
 )
+save(
+    "integer_gemm",
+    [node("Gemm", ["a", "b", "c"], ["y"], alpha=0.5, beta=-0.25)],
+    [info("a", [2, 1], T.INT64), info("b", [1, 2], T.INT64), info("c", [2], T.INT64)],
+    [info("y", [2, 2], T.INT64)],
+)
+
+save(
+    "image_decode",
+    [node("ImageDecoder", ["encoded"], ["pixels"])],
+    [info("encoded", [None], T.UINT8)],
+    [info("pixels", [None, None, 3], T.UINT8)],
+)
+
 if __name__ == "__main__":
     path = Path(__file__).resolve().parents[1] / "test" / "supplemental_models.dart"
     path.write_text(

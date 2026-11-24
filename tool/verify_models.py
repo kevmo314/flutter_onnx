@@ -168,12 +168,13 @@ def exchange(
         if ref.dtype.kind in "biuO" or expected_type in [21, 22, 25, 26]:
             np.testing.assert_array_equal(actual, ref, err_msg=name)
         else:
-            actual = actual.astype("float64")
-            ref = ref.astype("float64")
+            precision = "complex128" if ref.dtype.kind == "c" else "float64"
+            actual = actual.astype(precision)
+            ref = ref.astype(precision)
             np.testing.assert_allclose(actual, ref, rtol=rtol, atol=atol, err_msg=name)
         if predictions and (name == "logits" or len(expected) == 1):
             np.testing.assert_array_equal(actual.argmax(axis=-1), ref.argmax(axis=-1))
-        if ref.dtype.kind == "f":
+        if ref.dtype.kind in "fc":
             finite = np.isfinite(actual) & np.isfinite(ref)
             worst = max(
                 worst, float(np.max(np.abs(actual[finite] - ref[finite]), initial=0))

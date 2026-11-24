@@ -9,6 +9,27 @@ OnnxSession open(String name) =>
     OnnxSession.fromBytes(base64Decode(supplementalModels[name]!));
 
 void main() {
+  test('integer Gemm combines both fractions before truncating', () {
+    final large = (BigInt.one << 58) + BigInt.one;
+    final y = open('integer_gemm').run({
+      'a': Tensor.bigInts(TensorType.int64, [2, 1], [large, -large]),
+      'b': Tensor.int64([1, 2], [2, 1]),
+      'c': Tensor.int64([2], [0, -2]),
+    })['y']!;
+    expect(y.bigIntValues, [
+      large,
+      (large + BigInt.one) ~/ BigInt.two,
+      -large,
+      (-large + BigInt.one) ~/ BigInt.two
+    ]);
+  });
+  test('unrecognized image bytes return an empty image', () {
+    final y = open('image_decode').run({
+      'encoded': Tensor.fromValues(TensorType.uint8, [3], [0, 17, 99]),
+    })['pixels']!;
+    expect(y.shape, [0, 0, 3]);
+    expect(y.values, isEmpty);
+  });
   test('complex tensors preserve real and imaginary components', () {
     for (final type in [TensorType.complex64, TensorType.complex128]) {
       final values = [(1.25, -8.5), (-0.5, 4.0)];
