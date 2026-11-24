@@ -4,12 +4,28 @@ cd rtchat
 app=com.rtirl.chat
 if [[ "$1" == android ]]; then
   adb install -r build/app/outputs/flutter-apk/app-profile.apk
-  dir=/sdcard/Android/data/$app/files
-  adb shell mkdir -p "$dir"
-  adb push "$RUNNER_TEMP/supertonic-3" "$dir/"
-  adb logcat -c
-  adb shell am start -n "$app/.MainActivity"
-  read_report() { adb shell cat "$dir/playback.jsonl" 2>/dev/null | tr -d '\r'; }
+  device=$(adb get-serialno)
+  MODEL_DIR="$RUNNER_TEMP/supertonic-3"
+  dir="/data/user/0/$app/app_flutter"
+  if adb -s "$device" shell run-as "$app" id >/dev/null 2>&1; then
+    owner=(run-as "$app")
+  else
+    # Profile APKs can disable run-as. The Google APIs CI emulator is userdebug.
+    adb -s "$device" root
+    adb -s "$device" wait-for-device
+    test "$(adb -s "$device" shell id -u | tr -d '\r')" = 0
+    owner=()
+  fi
+  adb -s "$device" shell "${owner[@]}" mkdir -p "$dir/supertonic-3"
+  tar -C "$MODEL_DIR" -cf - . | adb -s "$device" shell -T "${owner[@]}" tar -xf - -C "$dir/supertonic-3"
+  adb -s "$device" shell "${owner[@]}" rm -f "$dir/playback.jsonl"
+  if (( ${#owner[@]} == 0 )); then
+    uid=$(adb -s "$device" shell stat -c %u "/data/user/0/$app" | tr -d '\r')
+    adb -s "$device" shell chown -R "$uid:$uid" "$dir"
+    adb -s "$device" shell restorecon -RF "$dir"
+  fi
+  adb -s "$device" shell am start -n "$app/.MainActivity"
+  read_report() { adb -s "$device" shell "${owner[@]}" cat "$dir/playback.jsonl" 2>/dev/null | tr -d '\r'; }
   logs() { adb logcat -d -t 1200 > "$RUNNER_TEMP/device.log"; }
 else
   device=$(xcrun simctl list devices available -j | python3 -c 'import sys,json; print(next(d["udid"] for rt,ds in json.load(sys.stdin)["devices"].items() if ".iOS-" in rt for d in ds if d["name"].startswith("iPhone")))')
