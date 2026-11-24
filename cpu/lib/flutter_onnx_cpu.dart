@@ -168,6 +168,68 @@ external void _scaledResidual(
   int end,
 );
 
+@Native<
+  Pointer<Void> Function(Pointer<Float>, Pointer<Float>, Int32, Int32, Int32)
+>(symbol: 'onnx_fc_create')
+external Pointer<Void> _createFc(
+  Pointer<Float> weights,
+  Pointer<Float> bias,
+  int channels,
+  int filters,
+  int threads,
+);
+@Native<Void Function(Pointer<Void>)>(symbol: 'onnx_fc_destroy')
+external void _destroyFc(Pointer<Void> handle);
+@Native<
+  Int32 Function(
+    Pointer<Void>,
+    Pointer<Float>,
+    Pointer<Float>,
+    Int32,
+    Int32,
+    Int32,
+    Int32,
+    Int32,
+  )
+>(symbol: 'onnx_fc_run')
+external int _runFc(
+  Pointer<Void> handle,
+  Pointer<Float> input,
+  Pointer<Float> output,
+  int batch,
+  int channels,
+  int width,
+  int filters,
+  int gelu,
+);
+
+class _DenseFilter implements Finalizable {
+  static final _free = NativeFinalizer(
+    Native.addressOf<NativeFunction<Void Function(Pointer<Void>)>>(_destroyFc),
+  );
+  final Pointer<Void> handle;
+  final Tensor? bias;
+  _DenseFilter(this.handle, this.bias, int size) {
+    if (handle != nullptr) _free.attach(this, handle, externalSize: size);
+  }
+  static _DenseFilter create(
+    Tensor weights,
+    Tensor? bias,
+    int threads,
+  ) => using((arena) {
+    final memory = arena<Float>(weights.length);
+    memory.asTypedList(weights.length).setAll(0, weights.values as Float32List);
+    final b = bias == null ? nullptr.cast<Float>() : arena<Float>(bias.length);
+    if (bias != null)
+      b.asTypedList(bias.length).setAll(0, bias.values as Float32List);
+    return _DenseFilter(
+      _createFc(memory, b, weights.shape[1], weights.shape[0], threads),
+      bias,
+      weights.length * 4,
+    );
+  }, malloc);
+}
+
 class _PackedFilters implements Finalizable {
   static final _free = NativeFinalizer(malloc.nativeFree);
   final Pointer<Float> data;
@@ -287,6 +349,7 @@ class NativeCpuBackend implements ChannelwiseBackend {
 
   // Both keys are weak. Closing the backend also releases its association
   // with prepared filters while the model itself is still loaded.
+  static final _dense = Expando<Expando<_DenseFilter>>();
   static final _caches = Expando<Expando<_PackedFilters>>();
 
   @override
@@ -325,6 +388,41 @@ class NativeCpuBackend implements ChannelwiseBackend {
         weights.length > 16 * 1024 * 1024 ||
         weights.length * batch * width < 250000)
       return null;
+    if ((Platform.isIOS || Platform.isMacOS) &&
+        filters >= 128 &&
+        channels >= 128) {
+      final cache = _dense[this] ??= Expando<_DenseFilter>();
+      var dense = cache[weights];
+      if (dense == null || !identical(dense.bias, bias)) {
+        dense = cache[weights] = _DenseFilter.create(
+          weights,
+          bias,
+          maxThreads.clamp(1, Platform.numberOfProcessors),
+        );
+      }
+      final filter = dense;
+      if (filter.handle != nullptr) {
+        final result = using((arena) {
+          final length = batch * filters * width;
+          final x = arena<Float>(input.length), y = arena<Float>(length);
+          x.asTypedList(input.length).setAll(0, input.values as Float32List);
+          if (_runFc(
+                filter.handle,
+                x,
+                y,
+                batch,
+                channels,
+                width,
+                filters,
+                gelu ? 1 : 0,
+              ) ==
+              0)
+            return null;
+          return Float32List.fromList(y.asTypedList(length));
+        }, malloc);
+        if (result != null) return result;
+      }
+    }
     final filtersByWeight = _caches[this] ??= Expando<_PackedFilters>();
     var cached = filtersByWeight[weights];
     if (cached == null || !identical(cached.bias, bias)) {
@@ -521,5 +619,6 @@ class NativeCpuBackend implements ChannelwiseBackend {
   @override
   Future<void> close() async {
     _caches[this] = null;
+    _dense[this] = null;
   }
 }
