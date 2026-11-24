@@ -62,7 +62,7 @@ Pushes and pull requests run the compatibility, platform inference, and RTChat m
 
 ### RTChat playback workload
 
-RTChat mobile speech CI builds the migrated app against the runtime revision under test. It runs three English chat segments with Supertonic 3, voice M2, speed 1 and five denoising steps on an Android x86-64 emulator (Flutter profile build) and an iPhone simulator (Flutter debug build). The report records model load time and native first-audio and playback-complete events for a cold utterance and two warm utterances.
+RTChat mobile speech CI builds the migrated app against the runtime revision under test. It runs three English chat segments with Supertonic 3, voice M2, speed 1 and five denoising steps on an Android x86-64 emulator (Flutter profile build) and an iPhone simulator (Flutter debug build). CI builds the iOS app on a separate runner so Xcode compilation and indexing do not compete with playback on the measurement host. The report records model load time and native first-audio and playback-complete events for a cold utterance and two warm utterances.
 
 After playback, the app synthesizes the same segments in three rounds with different noise seeds. It records the time spent in the public synthesis API and divides it by the duration of the returned PCM. Every round must have a real-time factor below 1. The artifacts also include per-segment real-time factors. Playback completion includes the time the audio device spends playing the queued samples. The first-audio event measures player-side startup. Acoustic latency requires a physical output measurement.
 

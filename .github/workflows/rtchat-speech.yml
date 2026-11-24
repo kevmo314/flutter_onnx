@@ -3,7 +3,7 @@ on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 concurrency:
-  group: rtchat-speech-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  group: rtchat-playback-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: true
 jobs:
   synthesis:
@@ -38,7 +38,7 @@ jobs:
       - name: Prepare the migrated app with the runtime under test
         working-directory: rtchat
         run: |
-          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/bea28831e0ca00e564ae9f42a86ec52d3672ff07/migration.patch -o "$RUNNER_TEMP/rtchat.patch"
+          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/02cc5bafb0979455194eadccc6c9a7ac637db014/migration.patch -o "$RUNNER_TEMP/rtchat.patch"
           git apply "$RUNNER_TEMP/rtchat.patch"
           cat > pubspec_overrides.yaml <<'EOF'
           dependency_overrides:
@@ -48,12 +48,13 @@ jobs:
               path: ../cpu
           EOF
           flutter pub get
-          bash .github/scripts/download-supertonic.sh 3 "$RUNNER_TEMP/supertonic-3"
-          echo "MODEL_DIR=$RUNNER_TEMP/supertonic-3" >> "$GITHUB_ENV"
       - name: Prepare Android profile build
         if: runner.os == 'Linux'
         working-directory: rtchat
         run: |
+          bash .github/scripts/download-supertonic.sh 3 "$RUNNER_TEMP/supertonic-3"
+          echo "MODEL_DIR=$RUNNER_TEMP/supertonic-3" >> "$GITHUB_ENV"
+          bash .github/scripts/prepare-supertonic-android.sh
           flutter build apk --profile --target-platform android-x64 -t integration_test/profile_playback.dart
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
@@ -68,16 +69,51 @@ jobs:
           ram-size: 4096M
           disk-size: 8192M
           script: cd rtchat && bash .github/scripts/profile-supertonic-device.sh android "$(adb get-serialno)"
-      - name: Profile iOS synthesis and playback
+      - name: Build iOS app for the playback benchmark
         if: runner.os == 'macOS'
         working-directory: rtchat
         run: |
+          flutter build ios --simulator --debug -t integration_test/profile_playback.dart
+          COPYFILE_DISABLE=1 tar -cf "$RUNNER_TEMP/ios-playback.tar" \
+            -C "$PWD/build/ios/iphonesimulator" Runner.app \
+            -C "$PWD/.github/scripts" download-supertonic.sh profile-supertonic-device.sh
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: ios-playback-app
+          path: ${{ runner.temp }}/ios-playback.tar
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'Linux'
+        with:
+          name: rtchat-playback-ubuntu-latest
+          path: ${{ runner.temp }}/playback-android.jsonl
+
+  ios-playback:
+    needs: synthesis
+    if: ${{ !cancelled() }}
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: ios-playback-app
+          path: ${{ runner.temp }}
+      - name: Profile iOS synthesis and playback on a fresh simulator host
+        working-directory: ${{ runner.temp }}
+        run: |
+          tar -xf ios-playback.tar
+          export MODEL_DIR="$RUNNER_TEMP/supertonic-3"
+          bash download-supertonic.sh 3 "$MODEL_DIR"
           device=$(xcrun simctl list devices available -j | python3 -c 'import json, sys; print(next(d["udid"] for r, devices in json.load(sys.stdin)["devices"].items() if ".iOS-" in r for d in devices if d["name"].startswith("iPhone")))')
           xcrun simctl boot "$device"
           xcrun simctl bootstatus "$device" -b
-          bash .github/scripts/profile-supertonic-device.sh ios "$device"
+          bash profile-supertonic-device.sh ios "$device" "$RUNNER_TEMP/Runner.app"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: rtchat-playback-${{ matrix.os }}
-          path: ${{ runner.temp }}/playback-*.jsonl
+          name: rtchat-playback-macos-26
+          path: ${{ runner.temp }}/playback-ios.jsonl
