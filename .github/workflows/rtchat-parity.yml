@@ -38,7 +38,7 @@ jobs:
           python-version: '3.12'
       - name: Prepare the pinned app and independent reference
         run: |
-          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/bf9baff5d549d4af8a156d58b4a679b470aebec1/migration.patch -o "$RUNNER_TEMP/migration.patch"
+          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/1e3134e5215e5ae5dce5de0736c6505fa7019fb0/migration.patch -o "$RUNNER_TEMP/migration.patch"
           git apply "$RUNNER_TEMP/migration.patch"
           flutter pub get
           python -m pip install supertonic==1.3.1
@@ -49,6 +49,12 @@ jobs:
       - name: Prepare Android emulator
         if: runner.os == 'Linux'
         run: |
+          df -h "$RUNNER_TEMP"
+          for attempt in 1 2 3; do
+            if "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install 'system-images;android-35;google_apis;x86_64'; then break; fi
+            sleep 5
+          done
+          test -s "$ANDROID_HOME/system-images/android-35/google_apis/x86_64/system.img"
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
