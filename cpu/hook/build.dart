@@ -10,7 +10,10 @@ void main(List<String> args) async {
       name: 'flutter_onnx_cpu',
       assetName: 'flutter_onnx_cpu.dart',
       sources: ['src/matmul.c', 'src/pointwise.c', 'src/channelwise.c'],
-      libraries: [if (os == OS.linux) 'pthread'],
+      libraries: [
+        if (os == OS.linux) 'pthread',
+        if (os == OS.android || os == OS.linux) 'm',
+      ],
       frameworks: [if (os == OS.iOS || os == OS.macOS) 'Accelerate'],
     ).run(input: input, output: output);
   });
