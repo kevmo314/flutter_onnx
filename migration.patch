@@ -63,10 +63,10 @@ index 0000000..25c3fbc
 +done < <(manifest)
 diff --git a/.github/scripts/profile-supertonic-device.sh b/.github/scripts/profile-supertonic-device.sh
 new file mode 100644
-index 0000000..2336f91
+index 0000000..94a235c
 --- /dev/null
 +++ b/.github/scripts/profile-supertonic-device.sh
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,127 @@
 +#!/usr/bin/env bash
 +# Run from the RTChat app root with the model staged on the runner.
 +set -euo pipefail
@@ -114,6 +114,13 @@ index 0000000..2336f91
 +    quiet = quiet + 1 if idle >= 0.75 else 0
 +    if quiet == 3:
 +        break
++if platform == "ios" and quiet < 3:
++    processes = subprocess.check_output(
++        ["ps", "-A", "-o", "pcpu=,pid=,comm="], text=True
++    ).splitlines()
++    processes.sort(key=lambda row: float(row.split(None, 1)[0]), reverse=True)
++    print("Highest CPU usage before playback (%CPU, PID, command):", flush=True)
++    print("\n".join(processes[:12]), flush=True)
 +PYTHON
 +}
 +
