@@ -33,5 +33,5 @@ PY
   if [[ "$engine" == migrated ]]; then
     grep GRAPH_US "$RUNNER_TEMP/$engine-flutter.log" | tee "$RUNNER_TEMP/graph-timings.log"
   fi
-  adb shell am force-stop com.rtirl.chat
+  adb uninstall com.rtirl.chat
 done
