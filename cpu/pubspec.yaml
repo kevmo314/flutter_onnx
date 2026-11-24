@@ -1,0 +1,14 @@
+name: flutter_onnx_cpu
+description: Native CPU matrix multiplication for flutter_onnx on Android, iOS, macOS and Linux.
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: '>=3.12.0 <4.0.0'
+dependencies:
+  flutter_onnx:
+    path: ..
+  hooks: ^2.2.0
+  code_assets: ^2.2.0
+  native_toolchain_c: ^0.19.0
+dev_dependencies:
+  test: ^1.25.0

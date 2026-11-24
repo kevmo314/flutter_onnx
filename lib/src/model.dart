@@ -211,10 +211,12 @@ class OnnxSession {
     final frame = _Frame(this, feeds, {});
     for (final node in _nodes) {
       final args = frame.args(node);
-      final product =
-          (node.op == 'MatMul' || node.op == 'Gemm' || node.op == _rowProduct)
-              ? await _tryAccelerate(node, args.cast<Tensor?>(), backend)
-              : null;
+      final product = (node.op == 'MatMul' ||
+              node.op == 'Gemm' ||
+              node.op == _rowProduct ||
+              node.op == 'Conv')
+          ? await _tryAccelerate(node, args.cast<Tensor?>(), backend)
+          : null;
       if (product != null) onAccelerated?.call(node.label);
       frame.store(node,
           product == null ? _valueNode(node, args, frame.values) : [product]);
@@ -234,6 +236,7 @@ abstract interface class MatMulBackend {
 
 Future<Tensor?> _tryAccelerate(
     _Node node, List<Tensor?> args, MatMulBackend backend) async {
+  if (node.op == 'Conv') return _accelerateConv1d(node, args, backend);
   if (node.op == _rowProduct) {
     final input = args[0]!, weights = args[1]!;
     final dims = _rowProductShape(input, weights);

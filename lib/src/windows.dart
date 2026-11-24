@@ -194,6 +194,149 @@ Tensor _scatterWindows(_Node n, List<Tensor?> args) {
   return Tensor.fromValues(x.type, shape, values);
 }
 
+// Lower a dense NCL convolution to K x T samples and F x K filters.
+Future<Tensor?> _accelerateConv1d(
+    _Node node, List<Tensor?> args, MatMulBackend backend) async {
+  final x = args[0]!, w = args[1]!, bias = args.elementAtOrNull(2);
+  if (x.type != TensorType.float32 ||
+      w.type != x.type ||
+      x.shape.length != 3 ||
+      w.shape.length != 3 ||
+      node.integer('group', 1) != 1 ||
+      w.shape[1] != x.shape[1]) return null;
+  final [batch, channels, width] = x.shape;
+  final [filters, _, taps] = w.shape;
+  final win = _Window(node, [width], [taps]);
+  final columns = win.output.single, inner = channels * taps;
+  if (batch == 0 || filters == 0 || inner == 0 || columns == 0) return null;
+  final source = x.values as Float32List, weights = w.values as Float32List;
+  final result = Float32List(_size([batch, filters, columns]));
+  final direct = taps == 1 &&
+      win.stride.single == 1 &&
+      win.pads.first == 0 &&
+      columns == width;
+  // Cap the temporary lowering buffer. Wide inputs can use the direct kernel.
+  if (!direct && inner * columns > 4 * 1024 * 1024) return null;
+  for (var b = 0; b < batch; b++) {
+    final Float32List samples;
+    if (direct) {
+      samples = Float32List.sublistView(
+          source, b * channels * width, (b + 1) * channels * width);
+    } else {
+      samples = Float32List(inner * columns);
+      for (var c = 0; c < channels; c++) {
+        for (var k = 0; k < taps; k++) {
+          final offset = k * win.dilation.single - win.pads.first;
+          final stride = win.stride.single;
+          final begin = math.max(0, (-offset + stride - 1) ~/ stride);
+          final end = math.min(columns, ((width - offset) / stride).ceil());
+          final row = (c * taps + k) * columns;
+          for (var j = begin; j < end; j++) {
+            samples[row + j] =
+                source[(b * channels + c) * width + offset + j * stride];
+          }
+        }
+      }
+    }
+    final data = await backend.multiply(weights, samples,
+        rows: filters, inner: inner, columns: columns);
+    if (data == null) return null;
+    if (data.length != filters * columns)
+      throw StateError('${backend.name} returned an incorrect matrix length');
+    final first = b * filters * columns;
+    if (bias == null) {
+      result.setRange(first, first + data.length, data);
+    } else {
+      for (var i = 0; i < filters; i++) {
+        final v = bias.values[i].toDouble();
+        for (var j = i * columns; j < (i + 1) * columns; j++)
+          result[first + j] = data[j] + v;
+      }
+    }
+  }
+  return Tensor._(
+      x.type, [batch, filters, columns], result.asUnmodifiableView());
+}
+
+// NCL convolution accumulates a contiguous time span for each weight.
+// Reuse one channel-sized accumulator across output channels and batches.
+Tensor _conv1d(Tensor x, Tensor w, Tensor? bias, _Window win, int group) {
+  final [batch, channels, width] = x.shape;
+  final [filters, depth, taps] = w.shape;
+  _require(group > 0 && depth * group == channels && filters % group == 0,
+      'Invalid Conv channel groups');
+  final size = win.output.single, stride = win.stride.single;
+  final dilation = win.dilation.single, pad = win.pads.first;
+  final source = x.values as Float32List, weights = w.values as Float32List;
+  final result = Float32List(batch * filters * size);
+  if (taps == 1 && stride == 1 && pad == 0 && size == width) {
+    // Pack adjacent time positions so a dot product processes eight frames
+    // at once. Pad only the final block, including widths not divisible by 8.
+    final blocks = (width + 7) ~/ 8;
+    final packed = Float32x4List(batch * channels * blocks * 2);
+    final packedFloats = Float32List.view(packed.buffer);
+    for (var c = 0; c < batch * channels; c++) {
+      packedFloats.setRange(
+          c * blocks * 8, c * blocks * 8 + width, source, c * width);
+    }
+    for (var b = 0; b < batch; b++) {
+      for (var f = 0; f < filters; f++) {
+        final first =
+            (b * channels + f ~/ (filters ~/ group) * depth) * blocks * 2;
+        final initial = Float32x4.splat(bias?.values[f].toDouble() ?? 0);
+        for (var block = 0; block < blocks; block++) {
+          var a = initial, z = initial, offset = first + block * 2;
+          for (var c = 0; c < depth; c++, offset += blocks * 2) {
+            final weight = Float32x4.splat(weights[f * depth + c]);
+            a += packed[offset] * weight;
+            z += packed[offset + 1] * weight;
+          }
+          final target = (b * filters + f) * width + block * 8;
+          final remain = width - block * 8;
+          if (remain >= 8) {
+            result[target] = a.x;
+            result[target + 1] = a.y;
+            result[target + 2] = a.z;
+            result[target + 3] = a.w;
+            result[target + 4] = z.x;
+            result[target + 5] = z.y;
+            result[target + 6] = z.z;
+            result[target + 7] = z.w;
+          } else {
+            final tail = [a.x, a.y, a.z, a.w, z.x, z.y, z.z, z.w];
+            result.setRange(target, target + remain, tail);
+          }
+        }
+      }
+    }
+    return Tensor._(TensorType.float32, [batch, filters, size],
+        result.asUnmodifiableView());
+  }
+  final row = Float64List(size);
+  for (var b = 0; b < batch; b++) {
+    for (var f = 0; f < filters; f++) {
+      row.fillRange(0, size, bias?.values[f].toDouble() ?? 0.0);
+      final firstChannel = b * channels + f ~/ (filters ~/ group) * depth;
+      for (var c = 0; c < depth; c++) {
+        for (var k = 0; k < taps; k++) {
+          final offset = k * dilation - pad;
+          final begin = math.max(0, (-offset + stride - 1) ~/ stride);
+          final end = math.min(size, ((width - offset) / stride).ceil());
+          final weight = weights[(f * depth + c) * taps + k];
+          var pos = (firstChannel + c) * width + offset + begin * stride;
+          for (var t = begin; t < end; t++, pos += stride) {
+            row[t] += source[pos] * weight;
+          }
+        }
+      }
+      result.setRange(
+          (b * filters + f) * size, (b * filters + f + 1) * size, row);
+    }
+  }
+  return Tensor._(
+      TensorType.float32, [batch, filters, size], result.asUnmodifiableView());
+}
+
 Tensor _convolve(_Node n, List<Tensor?> args) {
   final quant = n.op == 'QLinearConv',
       integer = n.op == 'ConvInteger',
@@ -232,6 +375,12 @@ Tensor _convolve(_Node n, List<Tensor?> args) {
       group = n.integer('group', 1),
       depth = w.shape[1],
       offsetGroups = n.integer('offset_group', 1);
+  if (n.op == 'Conv' &&
+      rank == 1 &&
+      x.type == TensorType.float32 &&
+      w.type == x.type) {
+    return _conv1d(x, w, bias, win, group);
+  }
   final shape = [x.shape[0], cout, ...win.output],
       type = quant
           ? args[7]!.type

@@ -161,8 +161,30 @@ class _IndexMap {
 
 Tensor _binary(String op, Tensor a, Tensor b) {
   final shape = _broadcastShape(a.shape, b.shape);
-  final ia = _IndexMap(a.shape, shape), ib = _IndexMap(b.shape, shape);
   _require(a.type == b.type, "Arithmetic operand types differ");
+  if (a.type == TensorType.float32) {
+    final left = a.values as Float32List, right = b.values as Float32List;
+    final size = _size(shape);
+    // Equal shapes and scalar broadcasts are contiguous; no division or
+    // coordinate reconstruction is needed in the inner loop.
+    if ((left.length == size || left.length == 1) &&
+        (right.length == size || right.length == 1)) {
+      final result = Float32List(size);
+      final stepA = left.length == 1 ? 0 : 1, stepB = right.length == 1 ? 0 : 1;
+      for (var i = 0, j = 0, k = 0; i < size; i++, j += stepA, k += stepB) {
+        final x = left[j], y = right[k];
+        result[i] = switch (op) {
+          'Add' => x + y,
+          'Sub' => x - y,
+          'Mul' => x * y,
+          'Div' => x / y,
+          _ => throw StateError(op)
+        };
+      }
+      return Tensor._(a.type, shape, result.asUnmodifiableView());
+    }
+  }
+  final ia = _IndexMap(a.shape, shape), ib = _IndexMap(b.shape, shape);
   return _generate(a.type, shape, (i) {
     final x = a.values[ia.at(i)].toDouble(), y = b.values[ib.at(i)].toDouble();
     return switch (op) {
