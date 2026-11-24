@@ -38,9 +38,10 @@ jobs:
           python-version: '3.12'
       - name: Prepare the pinned app and independent reference
         run: |
-          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/8eea9aa3412c3a7d2601689272bb0a098b19cf33/migration.patch -o "$RUNNER_TEMP/migration.patch"
+          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/3e53338c9b849d1a50c3dbc1dad0fa8d190745e5/migration.patch -o "$RUNNER_TEMP/migration.patch"
           git apply "$RUNNER_TEMP/migration.patch"
           flutter pub get
+          flutter analyze --no-pub integration_test/profile_playback.dart integration_test/on_device_tts_test.dart
           python -m pip install supertonic==1.3.1
           export MODEL_DIR="$RUNNER_TEMP/supertonic-3"
           echo "MODEL_DIR=$MODEL_DIR" >> "$GITHUB_ENV"
