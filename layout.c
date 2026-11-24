@@ -7,6 +7,10 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef BENCH_NEON
+void onnx_pointwise_pack(const float*,const float*,float*,int,int,int,int);
+int onnx_pointwise_run(const float*,const float*,float*,int,int,int,int,int,int);
+#endif
 static double now(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) * 1e-9; }
 static double polynomial(double x) {
   double t = 1 / (1 + .3275911*fabs(x));
@@ -101,6 +105,22 @@ static void compare(int f,int k,int t,int b,int gelu) {
     printf("FC %d %d %d %d gelu=%d threads=%d ms=%.3f error=%.9g\n",f,k,t,b,gelu,nt,durations[3],err);
     BNNSFilterDestroy(filter);
   }
+#ifdef BENCH_NEON
+  float *packed=malloc(f*(k+1)*4), *ncl=malloc(b*k*t*4);
+  onnx_pointwise_pack(nativeW,bias,packed,0,f,k,f);
+  for(int v=0;v<b;v++)for(int j=0;j<k;j++)memcpy(ncl+(v*k+j)*t,x+j*p+v*t,t*4);
+  for(int nt=1;nt<=2;nt++){
+    double start=now();
+    for(int i=0;i<60;i++) {
+      if(!onnx_pointwise_run(ncl,packed,out,b,k,t,f,0,nt))abort();
+      if(gelu)activate(out,b*t*f,1);
+    }
+    double ms=(now()-start)*1000/60,err=0;
+    for(int i=0;i<f*b*t;i++)err=fmax(err,fabs(ref[i]-out[i]));
+    printf("NEON %d %d %d %d threads=%d ms=%.3f error=%.9g\n",f,k,t,b,nt,ms,err);
+  }
+  free(packed);free(ncl);
+#endif
   free(nativeW);free(xt);free(yt);free(bias);
   free(w);free(x);free(out);free(prod);free(ref);
 }
