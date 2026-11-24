@@ -63,10 +63,10 @@ index 0000000..25c3fbc
 +done < <(manifest)
 diff --git a/.github/scripts/profile-supertonic-device.sh b/.github/scripts/profile-supertonic-device.sh
 new file mode 100644
-index 0000000..30c9a65
+index 0000000..2336f91
 --- /dev/null
 +++ b/.github/scripts/profile-supertonic-device.sh
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,120 @@
 +#!/usr/bin/env bash
 +# Run from the RTChat app root with the model staged on the runner.
 +set -euo pipefail
@@ -75,6 +75,47 @@ index 0000000..30c9a65
 +app=com.rtirl.chat
 +report="$RUNNER_TEMP/playback-$platform.jsonl"
 +target=integration_test/profile_playback.dart
++
++# Allow installation, simulator startup and indexing to settle before timing the
++# first model load. Keep all measurements even if the guest stays busy.
++wait_for_idle() {
++  python3 - "$platform" "$device" <<'PYTHON'
++import ctypes
++import subprocess
++import sys
++import time
++
++platform, device = sys.argv[1:]
++if platform == "ios":
++    libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
++    host = libc.mach_host_self()
++    def sample():
++        ticks = (ctypes.c_uint32 * 4)()
++        count = ctypes.c_uint32(4)
++        if libc.host_statistics(host, 3, ticks, ctypes.byref(count)) or count.value != 4:
++            raise RuntimeError("Couldn't read host CPU counters")
++        return sum(ticks), ticks[2]  # CPU_STATE_IDLE
++else:
++    def sample():
++        row = subprocess.check_output(
++            ["adb", "-s", device, "shell", "head", "-1", "/proc/stat"], text=True
++        )
++        ticks = list(map(int, row.split()[1:9]))
++        return sum(ticks), ticks[3] + ticks[4]
++
++previous = sample()
++quiet = 0
++for _ in range(36):
++    time.sleep(5)
++    current = sample()
++    idle = (current[1] - previous[1]) / max(1, current[0] - previous[0])
++    previous = current
++    print(f"{platform} CPU idle {idle:.0%}", flush=True)
++    quiet = quiet + 1 if idle >= 0.75 else 0
++    if quiet == 3:
++        break
++PYTHON
++}
 +
 +if [[ "$platform" == android ]]; then
 +  flutter build apk --profile --target-platform android-x64 -t "$target"
@@ -97,6 +138,7 @@ index 0000000..30c9a65
 +    adb -s "$device" shell chown -R "$uid:$uid" "$dir"
 +    adb -s "$device" shell restorecon -RF "$dir"
 +  fi
++  wait_for_idle
 +  adb -s "$device" shell am start -n "$app/.MainActivity"
 +  read_report() { adb -s "$device" shell "${owner[@]}" cat "$dir/playback.jsonl" 2>/dev/null | tr -d '\r'; }
 +else
@@ -106,6 +148,7 @@ index 0000000..30c9a65
 +  mkdir -p "$dir/supertonic-3"
 +  cp -R "$MODEL_DIR/." "$dir/supertonic-3/"
 +  rm -f "$dir/playback.jsonl"
++  wait_for_idle
 +  xcrun simctl launch --terminate-running-process "$device" "$app"
 +  read_report() { cat "$dir/playback.jsonl" 2>/dev/null; }
 +fi
@@ -2394,7 +2437,7 @@ index 65eb34d..14d25f8 100644
  // alternative. Models requiring phonemes need a separate engine integration.
  //
 diff --git a/packages/on_device_tts/pubspec.yaml b/packages/on_device_tts/pubspec.yaml
-index f6b7f11..514ae8a 100644
+index f6b7f11..662ddd0 100644
 --- a/packages/on_device_tts/pubspec.yaml
 +++ b/packages/on_device_tts/pubspec.yaml
 @@ -1,15 +1,24 @@
@@ -2415,12 +2458,12 @@ index f6b7f11..514ae8a 100644
 +  flutter_onnx:
 +    git:
 +      url: https://github.com/kevmo314/flutter_onnx.git
-+      ref: 026e7e0f3b4b721f0cad0d556e04aafd361c8226
++      ref: 7b0c91a8315eca416692a6013c0169288dbe3797
 +  flutter_onnx_cpu:
 +    git:
 +      url: https://github.com/kevmo314/flutter_onnx.git
 +      path: cpu
-+      ref: 026e7e0f3b4b721f0cad0d556e04aafd361c8226
++      ref: 7b0c91a8315eca416692a6013c0169288dbe3797
    background_downloader: ^9.6.4
    crypto: ^3.0.7
    flutter:
@@ -2631,7 +2674,7 @@ index 0000000..b3bae0f
 +  );
 +}
 diff --git a/pubspec.lock b/pubspec.lock
-index 8ecf368..618b279 100644
+index 8ecf368..61ebf82 100644
 --- a/pubspec.lock
 +++ b/pubspec.lock
 @@ -9,6 +9,14 @@ packages:
@@ -2670,8 +2713,8 @@ index 8ecf368..618b279 100644
 +    dependency: transitive
 +    description:
 +      path: "."
-+      ref: "026e7e0f3b4b721f0cad0d556e04aafd361c8226"
-+      resolved-ref: "026e7e0f3b4b721f0cad0d556e04aafd361c8226"
++      ref: "7b0c91a8315eca416692a6013c0169288dbe3797"
++      resolved-ref: "7b0c91a8315eca416692a6013c0169288dbe3797"
 +      url: "https://github.com/kevmo314/flutter_onnx.git"
 +    source: git
 +    version: "0.1.0"
@@ -2679,8 +2722,8 @@ index 8ecf368..618b279 100644
 +    dependency: transitive
 +    description:
 +      path: cpu
-+      ref: "026e7e0f3b4b721f0cad0d556e04aafd361c8226"
-+      resolved-ref: "026e7e0f3b4b721f0cad0d556e04aafd361c8226"
++      ref: "7b0c91a8315eca416692a6013c0169288dbe3797"
++      resolved-ref: "7b0c91a8315eca416692a6013c0169288dbe3797"
 +      url: "https://github.com/kevmo314/flutter_onnx.git"
 +    source: git
 +    version: "0.1.0"
