@@ -89,6 +89,7 @@ def exchange(
     *,
     external_data=None,
     capture=None,
+    check_distribution=None,
     predictions=True,
     atol=1e-4,
     rtol=1e-4,
@@ -161,6 +162,9 @@ def exchange(
             actual = onnx.numpy_helper.to_array(tensor)
         if capture is not None and name in capture:
             capture[name] = actual
+        if check_distribution is not None:
+            check_distribution(name, actual)
+            return
         if ref.dtype.kind in "biuO" or expected_type in [21, 22, 25, 26]:
             np.testing.assert_array_equal(actual, ref, err_msg=name)
         else:

@@ -3,7 +3,7 @@ description: A Dart implementation of ONNX inference for Flutter web, Android, a
 version: 0.1.0
 repository: https://github.com/kevmo314/flutter_onnx
 environment:
-  sdk: '>=3.5.0 <4.0.0'
+  sdk: '>=3.6.0 <4.0.0'
 platforms:
   android:
   ios:
@@ -12,4 +12,5 @@ dev_dependencies:
   test: ^1.25.0
   http: ^1.3.0
 dependencies:
-  image: ^4.13.1
+  image: 4.13.1
+  j2k: ^1.0.0

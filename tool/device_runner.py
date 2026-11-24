@@ -12,11 +12,13 @@ from pathlib import Path
 
 
 class DeviceRunner:
-    def __init__(self, folder, javascript, chrome, device=None):
+    def __init__(self, folder, javascript, chrome, device=None, timeout=900):
         self.folder = folder
+        self.timeout = timeout
         self.requests = queue.Queue()
         self.replies = queue.Queue()
         self.files = {"/client.js": javascript} if chrome else {}
+        self.last_route = ""
         bridge = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -31,6 +33,7 @@ class DeviceRunner:
                 self.end_headers()
 
             def do_GET(self):
+                bridge.last_route = "GET " + self.path
                 if self.path == "/":
                     body = b'<!doctype html><meta charset=utf-8><script defer src="/client.js"></script>'
                 elif self.path == "/next":
@@ -54,6 +57,7 @@ class DeviceRunner:
                 self.wfile.write(body)
 
             def do_POST(self):
+                bridge.last_route = "POST " + self.path
                 length = int(self.headers["Content-Length"])
                 if self.path == "/reply":
                     bridge.replies.put(json.loads(self.rfile.read(length)))
@@ -94,6 +98,8 @@ class DeviceRunner:
             [
                 chrome,
                 "--headless",
+                "--enable-logging=stderr",
+                "--disable-background-networking",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-background-timer-throttling",
@@ -107,24 +113,50 @@ class DeviceRunner:
 
     def run(self, request):
         self.files["/model"] = Path(request["model"])
-        feeds = {}
-        for i, (name, spec) in enumerate(request["feeds"].items()):
-            if isinstance(spec, str):
-                feeds[name] = spec
-            else:
-                route = f"/feed/{i}"
-                self.files[route] = Path(spec["file"])
-                feeds[name] = {**spec, "file": route}
-        self.requests.put({**request, "feeds": feeds})
+
+        def feed(spec, label):
+            if spec is None or isinstance(spec, str):
+                return spec
+            if isinstance(spec, list):
+                return [feed(item, f"{label}-{i}") for i, item in enumerate(spec)]
+            route = f"/feed/{label}"
+            self.files[route] = Path(spec["file"])
+            return {**spec, "file": route}
+
+        feeds = {
+            name: feed(spec, i)
+            for i, (name, spec) in enumerate(request["feeds"].items())
+        }
+        external = {}
+        for index, (location, path) in enumerate(
+            request.get("externalData", {}).items()
+        ):
+            route = f"/sidecar/{index}"
+            self.files[route] = Path(path)
+            external[location] = route
+        self.requests.put({**request, "feeds": feeds, "externalData": external})
         try:
-            reply = self.replies.get(timeout=900)
+            reply = self.replies.get(timeout=self.timeout)
         except queue.Empty:
             self.log.seek(0)
-            raise RuntimeError("Device timed out: " + self.log.read()[-2000:]) from None
-        for spec in reply.get("outputs", {}).values():
+            raise TimeoutError(
+                f"Device timed out on {request['model']} after {self.last_route}: "
+                + self.log.read()[-1600:]
+            ) from None
+
+        def unpack(spec):
+            if spec is None:
+                return
+            if isinstance(spec, list):
+                for item in spec:
+                    unpack(item)
+                return
             spec["file"] = str(
                 self.folder / ("browser-" + spec["file"].split("/")[-1] + ".bin")
             )
+
+        for spec in reply.get("outputs", {}).values():
+            unpack(spec)
         return reply
 
     def close(self):

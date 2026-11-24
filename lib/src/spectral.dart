@@ -149,28 +149,79 @@ Tensor _spectral(_Node n, List<Tensor?> args) {
   final dims = [...x.shape]
     ..[axis] = freq
     ..[rank - 1] = parts;
-  final src = _strides(x.shape), dst = _strides(dims);
-  return _generate(x.type, dims, (i) {
-    var base = 0;
-    for (var d = 0; d < rank - 1; d++)
-      if (d != axis) base += i ~/ dst[d] % dims[d] * src[d];
-    final k = i ~/ dst[axis] % freq, part = i % parts;
-    var sum = 0.0;
-    for (var j = 0;
-        j < (realInverse ? size : math.min(size, x.shape[axis]));
-        j++) {
-      final mirrored = realInverse && j > size ~/ 2,
-          input = mirrored ? size - j : j;
-      if (input >= x.shape[axis]) continue;
-      final re = x.values[base + input * src[axis]],
-          im = comp == 2
-              ? (mirrored ? -1 : 1) * x.values[base + input * src[axis] + 1]
-              : 0,
-          angle = (inv ? 2 : -2) * math.pi * j * k / size;
-      sum += part == 0
-          ? re * math.cos(angle) - im * math.sin(angle)
-          : re * math.sin(angle) + im * math.cos(angle);
+  _require(axis < rank - 1 && size > 0 && (comp == 1 || comp == 2),
+      'Invalid DFT dimensions');
+  final stride = _size(x.shape.sublist(axis + 1, rank - 1));
+  final outer = _size(x.shape.take(axis)), output = Float64List(_size(dims));
+  final scratch = Float32List(1);
+  double round(double v) {
+    if (x.type == TensorType.float64) return v;
+    scratch[0] = v;
+    return scratch[0];
+  }
+
+  for (var batch = 0; batch < outer; batch++)
+    for (var lane = 0; lane < stride; lane++) {
+      final signal = List.generate(size, (j) {
+        final mirror = realInverse && j > size ~/ 2, t = mirror ? size - j : j;
+        if (t >= x.shape[axis]) return (0.0, 0.0);
+        final k = ((batch * x.shape[axis] + t) * stride + lane) * comp;
+        return (
+          x.values[k].toDouble(),
+          comp == 2 ? (mirror ? -1 : 1) * x.values[k + 1].toDouble() : 0.0
+        );
+      });
+      final transformed = _fourier(signal, inv ? 1 : -1, round);
+      for (var k = 0; k < freq; k++) {
+        final dest = ((batch * freq + k) * stride + lane) * parts;
+        final v = transformed[k], scale = inv ? round(1 / size) : 1.0;
+        output[dest] = v.$1 * scale;
+        if (parts == 2)
+          output[dest + 1] =
+              comp == 1 && (k == 0 || 2 * k == size) ? 0 : v.$2 * scale;
+      }
     }
-    return sum / (inv ? size : 1);
+  return Tensor.fromValues(x.type, dims, output);
+}
+
+// Decimation in frequency. The half-length transforms produce even and odd
+// frequency bins. Pairing conjugate roots in the odd-length base transform
+// avoids a separate trigonometric evaluation for the negative frequencies.
+List<(double, double)> _fourier(
+    List<(double, double)> x, int sign, double Function(double) round) {
+  final n = x.length;
+  if (n <= 1) return x;
+  if (n.isEven) {
+    final h = n ~/ 2, even = <(double, double)>[], odd = <(double, double)>[];
+    for (var j = 0; j < h; j++) {
+      final a = x[j],
+          b = x[j + h],
+          re = round(a.$1 - b.$1),
+          im = round(a.$2 - b.$2);
+      final angle = 2 * math.pi * j / n,
+          c = round(math.cos(angle)),
+          s = sign * round(math.sin(angle));
+      even.add((round(a.$1 + b.$1), round(a.$2 + b.$2)));
+      odd.add((
+        round(round(re * c) - round(im * s)),
+        round(round(re * s) + round(im * c))
+      ));
+    }
+    final e = _fourier(even, sign, round), o = _fourier(odd, sign, round);
+    return [
+      for (var k = 0; k < h; k++) ...[e[k], o[k]]
+    ];
+  }
+  return List.generate(n, (k) {
+    var re = x.first.$1, im = x.first.$2, crossRe = 0.0, crossIm = 0.0;
+    for (var j = 1; j <= n ~/ 2; j++) {
+      final a = x[j], b = x[n - j], angle = 2 * math.pi * (k * j % n) / n;
+      final c = round(math.cos(angle)), s = sign * round(math.sin(angle));
+      re = round(re + round(round(a.$1 + b.$1) * c));
+      im = round(im + round(round(a.$2 + b.$2) * c));
+      crossIm = round(crossIm + round(round(a.$1 - b.$1) * s));
+      crossRe = round(crossRe + round(round(a.$2 - b.$2) * s));
+    }
+    return (round(re - crossRe), round(im + crossIm));
   });
 }

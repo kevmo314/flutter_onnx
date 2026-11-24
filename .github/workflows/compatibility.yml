@@ -16,13 +16,18 @@ jobs:
       - run: python -m pip install onnx==1.23.2 onnxruntime==1.32.0 numpy
       - run: dart pub get --no-example
       - run: python tool/verify_randomized.py
-      - run: python tool/opset_conformance.py --baseline tool/conformance-baseline.txt --report report.json
+      - run: python tool/opset_conformance.py --strict --baseline tool/conformance-baseline.txt --report report.json
+      - run: python tool/opset_conformance.py --browser google-chrome --strict --baseline tool/conformance-baseline.txt --report browser-report.json
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: opset-28-results
-          path: report.json
+          path: |
+            *report*.json
       - run: python tool/verify_models.py --cache /tmp/models squeezenet1_1 mobilenetv2_050
       - if: github.event_name == 'workflow_dispatch'
         run: python tool/verify_models.py --cache /tmp/models resnet18 efficientnet_b0 densenet121 mobilenetv3_small_050 qwen qwen_q4 qwen3_q4
       - if: github.event_name == 'workflow_dispatch'
         run: python tool/verify_qwen35.py --cache /tmp/models/qwen35
+      - if: github.event_name == 'workflow_dispatch'
+        run: python tool/verify_qwen35.py --cache /tmp/models/qwen35 --image

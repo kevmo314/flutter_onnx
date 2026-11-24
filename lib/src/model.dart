@@ -35,19 +35,22 @@ class TensorInfo {
     return TensorInfo._(name, _type(t.integer(1)), dims);
   }
 
-  void _check(OnnxValue value, Map<String, int> symbols) {
+  void _check(OnnxValue value, Map<String, int> symbols,
+      {bool checkDimensions = true}) {
     if (kind == 'optional') {
       final present = value is OnnxOptional ? value.value : value;
-      if (present != null) element!._check(present, symbols);
+      if (present != null)
+        element!._check(present, symbols, checkDimensions: checkDimensions);
       return;
     }
     if (kind == 'sequence') {
       if (value is! OnnxSequence)
         throw ArgumentError('$name expects a sequence');
       for (final item in value.elements) {
-        // A sequence may contain tensors of different shapes. Symbols first
-        // encountered inside an element bind within that element.
-        element!._check(item, {...symbols});
+        // Sequence kernels, especially Loop, can append differently shaped
+        // tensors. Preserve element shape annotations as metadata while
+        // checking the runtime element kind and dtype.
+        element!._check(item, symbols, checkDimensions: false);
       }
       return;
     }
@@ -55,7 +58,7 @@ class TensorInfo {
     final t = value;
     _require(type == t.type, '$name expects $type, got ${t.type}');
     final dims = dimensions;
-    if (dims == null) return;
+    if (!checkDimensions || dims == null) return;
     _require(
         dims.length == t.shape.length, '$name expects rank ${dims.length}');
     for (var i = 0; i < dims.length; i++) {
@@ -126,18 +129,31 @@ class OnnxSession {
         .map((p) => _Node.read(p, version, externalData, functions))
         .toList();
     final weights = <String, Tensor>{};
-    for (final t in graph.messages(5)) {
-      final name = t.string(8);
-      if (name.isEmpty || weights.containsKey(name))
-        throw FormatException('Invalid initializer name "$name"');
-      weights[name] = _tensor(t, externalData: externalData);
+    void addWeight(String name, Tensor tensor) {
+      if (name.isEmpty) throw const FormatException('Unnamed initializer');
+      final prior = weights[name];
+      if (prior == null) {
+        weights[name] = tensor;
+        return;
+      }
+      // Some exporters serialize the same named weight at different offsets.
+      if (prior.type != tensor.type || !_sameShape(prior.shape, tensor.shape))
+        throw FormatException('Conflicting initializer $name');
+      final List<Object> a = prior.type == TensorType.string
+          ? prior.stringValues
+          : prior.toBytes();
+      final List<Object> b = tensor.type == TensorType.string
+          ? tensor.stringValues
+          : tensor.toBytes();
+      for (var i = 0; i < a.length; i++)
+        if (a[i] != b[i])
+          throw FormatException('Conflicting initializer $name');
     }
-    for (final sparse in graph.messages(15)) {
-      final name = sparse.message(1).string(8);
-      if (name.isEmpty || weights.containsKey(name))
-        throw FormatException('Invalid sparse initializer name "$name"');
-      weights[name] = _sparseTensor(sparse, externalData);
-    }
+
+    for (final t in graph.messages(5))
+      addWeight(t.string(8), _tensor(t, externalData: externalData));
+    for (final t in graph.messages(15))
+      addWeight(t.message(1).string(8), _sparseTensor(t, externalData));
     final known = {...inputs.keys, ...weights.keys};
     final uses = <String, int>{};
     for (final node in nodes) {
@@ -448,6 +464,8 @@ const _extensions = <String, _Schema>{
       _Schema(3, 4, '111?', 1, 4, '1???', {'epsilon': 1}, []),
   'com.microsoft::RotaryEmbedding': _Schema(4, 4, '1111', 1, 1, '1',
       {'num_heads': 2, 'rotary_embedding_dim': 2, 'interleaved': 2}, []),
+  'com.microsoft::MultiHeadAttention': _Schema(1, 8, '1???????', 1, 3, '1??',
+      {'num_heads': 2, 'scale': 1}, ['num_heads']),
   'com.microsoft::GroupQueryAttention':
       _Schema(7, 11, '111??11????', 1, 3, '1??', {
     'num_heads': 2,

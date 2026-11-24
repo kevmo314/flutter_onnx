@@ -103,6 +103,27 @@ List<Tensor> _executeNode(_Node n, List<Tensor?> args) {
         _rotary(_Node('RotaryEmbedding', n.label, n.outputs, [], attrs),
             [x, cos, args[3], positions])
       ];
+    case 'com.microsoft::MultiHeadAttention':
+      _require(
+          args.elementAtOrNull(1)?.shape.length == 3 &&
+              args.elementAtOrNull(2)?.shape.length == 3 &&
+              args.elementAtOrNull(3) == null &&
+              args.elementAtOrNull(4) == null,
+          'Expected separate rank-three Q, K and V without projection bias or key padding mask');
+      final heads = n.integer('num_heads', 0);
+      final attrs = <String, Object>{
+        'q_num_heads': heads,
+        'kv_num_heads': heads,
+        if (n.attrs.containsKey('scale')) 'scale': n.real('scale', 0)
+      };
+      return _attention(_Node('Attention', n.label, n.outputs, [], attrs), [
+        x,
+        args[1],
+        args[2],
+        args.elementAtOrNull(5),
+        args.elementAtOrNull(6),
+        args.elementAtOrNull(7)
+      ]);
     case 'com.microsoft::GroupQueryAttention':
       final lengths = args[5]!, total = args[6]!.values.single;
       _require(lengths.values.every((v) => v + 1 == total),

@@ -90,19 +90,41 @@ Tensor _vectorizer(_Node n, Tensor x) {
 }
 
 Tensor _decodeImage(_Node n, Tensor x) {
-  final bytes = Uint8List.fromList(x.values.cast<int>()),
-      picture = img.decodeImage(bytes);
-  if (picture == null)
-    throw UnsupportedError('ImageDecoder: unsupported encoded image');
+  final bytes = Uint8List.fromList(x.values.cast<int>());
+  final jp2 = bytes.length >= 12 &&
+      ByteData.sublistView(bytes).getUint32(4) == 0x6a502020;
+  final codestream = bytes.length >= 2 && bytes[0] == 0xff && bytes[1] == 0x4f;
+  img.Image? decode() => jp2 || codestream
+      ? _decodeJpeg2000(bytes)
+      : bytes.length >= 2 && bytes[0] == 255 && bytes[1] == 216
+          ? _decodeJpeg(bytes)
+          : bytes.length >= 12 &&
+                  ByteData.sublistView(bytes).getUint32(8) == 0x57454250
+              ? _decodeWebp(bytes)
+              : img.decodeImage(bytes);
+  img.Image? picture;
+  try {
+    picture = decode();
+  } on Exception {
+    picture = null;
+  } on RangeError {
+    picture = null;
+  } on StateError {
+    picture = null;
+  }
   final fmt = n.attrs['pixel_format'] ?? 'RGB',
       channels = fmt == 'Grayscale' ? 1 : 3;
+  _require(fmt == 'RGB' || fmt == 'BGR' || fmt == 'Grayscale',
+      'Unsupported pixel format');
+  if (picture == null)
+    return Tensor.fromValues(TensorType.uint8, [0, 0, channels], []);
   final out = Uint8List(picture.width * picture.height * channels);
   var i = 0;
   for (final pixel
       in picture.convert(format: img.Format.uint8, numChannels: 3)) {
     final r = pixel.r.toInt(), g = pixel.g.toInt(), b = pixel.b.toInt();
     if (channels == 1) {
-      out[i++] = (r * 0.299 + g * 0.587 + b * 0.114).round();
+      out[i++] = (19595 * r + 38470 * g + 7471 * b + 32768) ~/ 65536;
     } else {
       out[i++] = fmt == 'BGR' ? b : r;
       out[i++] = g;
@@ -111,6 +133,30 @@ Tensor _decodeImage(_Node n, Tensor x) {
   }
   return Tensor._(TensorType.uint8, [picture.height, picture.width, channels],
       out.asUnmodifiableView());
+}
+
+img.Image? _decodeWebp(Uint8List bytes) {
+  final decoder = img.WebPDecoder(), info = decoder.startDecode(bytes);
+  if (info is! InternalWebPInfo) return null;
+  if (info.format != img.WebPFormat.lossy) return decoder.decodeFrame(0);
+  final payload =
+      img.InputBuffer(bytes).subset(info.vp8Size, position: info.vp8Position);
+  return webp.VP8(payload, info).decode();
+}
+
+img.Image _decodeJpeg2000(Uint8List bytes) {
+  final decoded = jp2.decodeJpeg2000(bytes), components = decoded.components;
+  final image = img.Image(width: decoded.width, height: decoded.height);
+  final data = decoded.pixels;
+  _require(decoded.colorComponents == 1 || decoded.colorComponents == 3,
+      'Unsupported JPEG 2000 colour space');
+  for (var y = 0; y < decoded.height; y++)
+    for (var x = 0; x < decoded.width; x++) {
+      final i = (y * decoded.width + x) * components, r = data[i];
+      image.setPixelRgb(x, y, r, decoded.colorComponents == 1 ? r : data[i + 1],
+          decoded.colorComponents == 1 ? r : data[i + 2]);
+    }
+  return image;
 }
 
 // MT19937 with the 53-bit uniform conversion used by NumPy RandomState.

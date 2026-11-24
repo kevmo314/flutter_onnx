@@ -21,9 +21,17 @@ HASHES = {
 }
 
 
-def run(cache, folder, exe):
+def run(cache, folder, exe, image=False):
     cache.mkdir(parents=True, exist_ok=True)
-    for name, expected in HASHES.items():
+    files = dict(HASHES)
+    if image:
+        files.update(
+            {
+                "vision_encoder_q4.onnx": "bc3ecbf4d75759ccb3c197164777e07de9e0fdd606a07127e48b39385fdf6122",
+                "vision_encoder_q4.onnx_data": "98aebedf02fc5414fd1c7f06a6580b42e272600ace9ecd33bfbc479a0c541c64",
+            }
+        )
+    for name, expected in files.items():
         file = cache / name
         if not file.exists():
             tmp = file.with_suffix(".download")
@@ -79,6 +87,33 @@ def run(cache, folder, exe):
             return proc
 
         embedding, decoder = process(), process()
+        if image:
+            path = cache / "vision_encoder_q4.onnx"
+            vision_inputs = {
+                "pixel_values": np.random.default_rng(314)
+                .normal(size=(4, 1536))
+                .astype(np.float32),
+                "image_grid_thw": np.array([[1, 2, 2]], np.int64),
+            }
+            reference_features = oracle(path).run(None, vision_inputs)[0]
+            features = {"image_features": None}
+            diff = exchange(
+                process(),
+                folder,
+                path,
+                vision_inputs,
+                {"image_features": reference_features},
+                capture=features,
+                external_data=side(path),
+                predictions=False,
+                atol=5e-4,
+            )
+            print(
+                f"Vision encoder: {reference_features.shape}, maximum absolute error {diff:.8g}",
+                flush=True,
+            )
+            # One spatially merged image token has identical three-axis MRoPE positions.
+            tokens = np.array([[248053, 248056, 248054, 9707]], np.int64)
         for step in range(3):
             feed = {"input_ids": tokens}
             vector = embed.run(None, feed)[0]
@@ -93,6 +128,10 @@ def run(cache, folder, exe):
                 external_data=side(embed_path),
                 predictions=False,
             )
+            if image and step == 0:
+                vector[:, 1] = reference_features
+                observed[key] = observed[key].copy()
+                observed[key][:, 1] = features["image_features"]
             count = tokens.shape[1]
             inputs = {
                 "inputs_embeds": vector,
@@ -117,7 +156,7 @@ def run(cache, folder, exe):
                 rtol=1e-4,
             )
             print(
-                f"Qwen3.5 text step {step + 1}: embedding + {len(names)} decoder outputs, maximum absolute error {diff:.8g}",
+                f"Qwen3.5 {'image and text' if image else 'text'} step {step + 1}: embedding + {len(names)} decoder outputs, maximum absolute error {diff:.8g}",
                 flush=True,
             )
             tokens = ref["logits"][:, -1, :].argmax(-1).astype(np.int64)[:, None]
@@ -129,6 +168,11 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--cache", type=Path, required=True)
     p.add_argument("--runner", type=Path)
+    p.add_argument(
+        "--image",
+        action="store_true",
+        help="Include the vision encoder and feed its features to the hybrid decoder.",
+    )
     args = p.parse_args()
     with tempfile.TemporaryDirectory() as tmp:
         folder = Path(tmp)
@@ -138,7 +182,7 @@ def main():
                 ["dart", "compile", "exe", "tool/compare_runner.dart", "-o", str(exe)],
                 check=True,
             )
-        run(args.cache.resolve(), folder, exe)
+        run(args.cache.resolve(), folder, exe, args.image)
 
 
 if __name__ == "__main__":
