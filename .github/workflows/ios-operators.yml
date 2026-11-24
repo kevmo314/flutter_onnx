@@ -1,5 +1,8 @@
 name: Profile RTChat iOS operators
-on: [push, workflow_dispatch]
+on:
+  push:
+    paths: ['instrument.py', '.github/workflows/ios-operators.yml']
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
