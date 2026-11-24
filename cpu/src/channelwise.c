@@ -18,9 +18,11 @@ EXPORT void onnx_channel_norm(const float *x, const float *scale,
     double mean[span] = {0}, inverse[span] = {0};
     for (int c = 0; c < channels; ++c) {
       const float *row = x + (size_t)c * width + start;
-      for (int t = 0; t < count; ++t) mean[t] += row[t];
+      for (int t = 0; t < count; ++t)
+        mean[t] += row[t];
     }
-    for (int t = 0; t < count; ++t) mean[t] /= channels;
+    for (int t = 0; t < count; ++t)
+      mean[t] /= channels;
     for (int c = 0; c < channels; ++c) {
       const float *row = x + (size_t)c * width + start;
       for (int t = 0; t < count; ++t) {
@@ -33,8 +35,8 @@ EXPORT void onnx_channel_norm(const float *x, const float *scale,
     for (int c = 0; c < channels; ++c) {
       const size_t index = (size_t)c * width + start;
       for (int t = 0; t < count; ++t)
-        y[index + t] = (x[index + t] - mean[t]) * inverse[t] * scale[c]
-                       + (bias ? bias[c] : 0.0);
+        y[index + t] = (x[index + t] - mean[t]) * inverse[t] * scale[c] +
+                       (bias ? bias[c] : 0.0);
     }
   }
 }
@@ -43,8 +45,8 @@ EXPORT void onnx_channel_norm(const float *x, const float *scale,
 // has already run. Match the portable kernel's double-precision accumulation.
 EXPORT void onnx_depthwise_valid(const float *x, const float *w,
                                  const float *bias, float *y, int channels,
-                                 int width, int taps, int dilation,
-                                 int first, int end) {
+                                 int width, int taps, int dilation, int first,
+                                 int end) {
   const int output = width - (taps - 1) * dilation;
   for (int row = first; row < end; ++row) {
     const int c = row % channels;

@@ -261,7 +261,9 @@ class NativeCpuBackend implements ChannelwiseBackend {
     return result;
   }
 
-  static final _filters = Expando<_PackedFilters>();
+  // Both keys are weak. Closing the backend also releases its association
+  // with prepared filters while the model itself is still loaded.
+  static final _caches = Expando<Expando<_PackedFilters>>();
 
   @override
   Future<Float32List?> pointwise(
@@ -299,9 +301,10 @@ class NativeCpuBackend implements ChannelwiseBackend {
         weights.length > 16 * 1024 * 1024 ||
         weights.length * batch * width < 250000)
       return null;
-    var cached = _filters[weights];
+    final filtersByWeight = _caches[this] ??= Expando<_PackedFilters>();
+    var cached = filtersByWeight[weights];
     if (cached == null || !identical(cached.bias, bias)) {
-      cached = _filters[weights] = _PackedFilters(weights, bias);
+      cached = filtersByWeight[weights] = _PackedFilters(weights, bias);
     }
     final parameters = cached;
     return using((arena) {
@@ -450,5 +453,7 @@ class NativeCpuBackend implements ChannelwiseBackend {
   }
 
   @override
-  Future<void> close() async {}
+  Future<void> close() async {
+    _caches[this] = null;
+  }
 }
