@@ -1,7 +1,5 @@
 name: Platform inference
 on: [push, pull_request, workflow_dispatch]
-env:
-  FULL_MODELS: ${{ github.event_name == 'workflow_dispatch' }}
 permissions:
   contents: read
 jobs:
@@ -14,10 +12,14 @@ jobs:
           flutter-version: '3.38.9'
           cache: true
       - run: dart pub get
-      - run: dart analyze lib test
+      - run: dart analyze lib test tool
       - run: dart test -p vm
       - run: dart test -p chrome
       - run: flutter pub get
+        working-directory: example
+      - run: flutter pub get && flutter analyze lib
+        working-directory: accelerators
+      - run: flutter analyze lib test integration_test
         working-directory: example
       - run: flutter build web
         working-directory: example
@@ -29,7 +31,7 @@ jobs:
           exec google-chrome --enable-unsafe-webgpu --enable-unsafe-swiftshader --use-angle=swiftshader "$@"
           SH
           chmod +x "$RUNNER_TEMP/chrome-gpu"
-          CHROME_EXECUTABLE="$RUNNER_TEMP/chrome-gpu" flutter test --platform chrome --dart-define=REQUIRE_WEBGPU=true test/webgpu_test.dart
+          CHROME_EXECUTABLE="$RUNNER_TEMP/chrome-gpu" flutter test --platform chrome --dart-define=REQUIRE_WEBGPU=true test
   android:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -44,14 +46,12 @@ jobs:
           flutter-version: '3.38.9'
           cache: true
       - uses: actions/setup-python@v5
-        if: github.event_name == 'workflow_dispatch'
         with:
           python-version: '3.12'
-      - if: github.event_name == 'workflow_dispatch'
-        run: python -m pip install onnx==1.23.2 onnxruntime==1.32.0 numpy
+      - run: python -m pip install onnx==1.23.2 onnxruntime==1.32.0 numpy
       - run: flutter pub get
         working-directory: example
-      - run: flutter build apk --debug --dart-define=VERIFY_LARGE_MODELS=$FULL_MODELS --target integration_test/platform_check.dart
+      - run: flutter build apk --debug --dart-define=VERIFY_LARGE_MODELS=true --target integration_test/platform_check.dart
         working-directory: example
       - name: Enable KVM
         run: |
@@ -63,12 +63,13 @@ jobs:
           api-level: 35
           arch: x86_64
           ram-size: 4096M
-          working-directory: example
           script: |
-            bash ../tool/check_mobile.sh android
-            if [ "$FULL_MODELS" = "true" ]; then cd .. && python tool/verify_models.py --cache "$RUNNER_TEMP/models" --device android qwen_q4 qwen3_q4 && python tool/opset_conformance.py --device android --strict --baseline tool/conformance-baseline.txt --report android-opset.json; fi
+            cd example && bash ../tool/check_mobile.sh android
+            python tool/verify_models.py --cache "$RUNNER_TEMP/models" --device android qwen_q4 qwen3_q4
+            python tool/opset_conformance.py --device android --strict --baseline tool/conformance-baseline.txt --report android-opset.json
+            cd example && flutter test --no-pub integration_test -d emulator-5554
       - uses: actions/upload-artifact@v4
-        if: always() && github.event_name == 'workflow_dispatch'
+        if: always()
         with:
           name: android-opset-28
           path: android-opset*.json
@@ -82,11 +83,9 @@ jobs:
           flutter-version: '3.38.9'
           cache: true
       - uses: actions/setup-python@v5
-        if: github.event_name == 'workflow_dispatch'
         with:
           python-version: '3.12'
-      - if: github.event_name == 'workflow_dispatch'
-        run: python -m pip install onnx==1.23.2 onnxruntime==1.32.0 numpy
+      - run: python -m pip install onnx==1.23.2 onnxruntime==1.32.0 numpy
       - name: Run inference on an iPhone simulator
         working-directory: example
         run: |
@@ -94,15 +93,15 @@ jobs:
           xcrun simctl boot "$simulator"
           xcrun simctl bootstatus "$simulator" -b
           flutter pub get
-          flutter build ios --simulator --debug --dart-define=VERIFY_LARGE_MODELS=$FULL_MODELS --target integration_test/platform_check.dart
+          flutter build ios --simulator --debug --dart-define=VERIFY_LARGE_MODELS=true --target integration_test/platform_check.dart
           bash ../tool/check_mobile.sh ios "$simulator"
-          if [ "$FULL_MODELS" = "true" ]; then
-            cd ..
-            python tool/verify_models.py --cache "$RUNNER_TEMP/models" --device "$simulator" qwen_q4 qwen3_q4
-            python tool/opset_conformance.py --device "$simulator" --strict --baseline tool/conformance-baseline.txt --report ios-opset.json
-          fi
+          cd ..
+          python tool/verify_models.py --cache "$RUNNER_TEMP/models" --device "$simulator" qwen_q4 qwen3_q4
+          python tool/opset_conformance.py --device "$simulator" --strict --baseline tool/conformance-baseline.txt --report ios-opset.json
+          cd example
+          flutter test --no-pub integration_test -d "$simulator"
       - uses: actions/upload-artifact@v4
-        if: always() && github.event_name == 'workflow_dispatch'
+        if: always()
         with:
           name: ios-opset-28
           path: ios-opset*.json

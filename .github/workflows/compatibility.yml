@@ -4,7 +4,18 @@ permissions:
   contents: read
 jobs:
   oracle:
+    name: ONNX reference comparisons (${{ matrix.target }})
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: vm
+            runner: compare
+          - target: chrome
+            runner: compare.js
+            options: --browser google-chrome
     steps:
       - uses: actions/checkout@v4
       - uses: dart-lang/setup-dart@v1
@@ -15,23 +26,34 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install onnx==1.23.2 onnxruntime==1.32.0 numpy
       - run: dart pub get --no-example
-      - run: python tool/verify_randomized.py
-      - run: python tool/opset_conformance.py --strict --baseline tool/conformance-baseline.txt --report report.json
-      - run: python tool/opset_conformance.py --browser google-chrome --strict --baseline tool/conformance-baseline.txt --report browser-report.json
+      - name: Run randomized differential checks
+        if: matrix.target == 'vm'
+        run: python tool/verify_randomized.py
+      - name: Compile comparison runner
+        run: |
+          if [[ "${{ matrix.target }}" == chrome ]]; then
+            dart compile js -O2 tool/model_client.dart -o "$RUNNER_TEMP/compare.js"
+          else
+            dart compile exe tool/compare_runner.dart -o "$RUNNER_TEMP/compare"
+          fi
+      - name: Check all opset 28 operators
+        run: |
+          python tool/opset_conformance.py ${{ matrix.options }} \
+            --runner "$RUNNER_TEMP/${{ matrix.runner }}" \
+            --strict --baseline tool/conformance-baseline.txt --report report.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: opset-28-results
-          path: |
-            *report*.json
-      - run: python tool/verify_models.py --cache /tmp/models squeezenet1_1 mobilenetv2_050
-      - if: github.event_name == 'workflow_dispatch'
-        run: python tool/verify_models.py --cache /tmp/models resnet18 efficientnet_b0 densenet121 mobilenetv3_small_050 qwen qwen_q4 qwen3_q4
-      - if: github.event_name == 'workflow_dispatch'
-        run: python tool/verify_qwen35.py --cache /tmp/models/qwen35
-      - if: github.event_name == 'workflow_dispatch'
-        run: python tool/verify_qwen35.py --cache /tmp/models/qwen35 --image
-      - if: github.event_name == 'workflow_dispatch'
-        run: python tool/verify_models.py --cache /tmp/models --browser google-chrome qwen qwen_q4 qwen3_q4
-      - if: github.event_name == 'workflow_dispatch'
-        run: python tool/verify_qwen35.py --cache /tmp/models/qwen35 --browser google-chrome --image
+          name: opset-28-${{ matrix.target }}
+          path: report*.json
+      - name: Compare six classifiers and Qwen2.5 and Qwen3
+        run: |
+          python tool/verify_models.py ${{ matrix.options }} \
+            --runner "$RUNNER_TEMP/${{ matrix.runner }}" \
+            --cache "$RUNNER_TEMP/models" squeezenet1_1 mobilenetv2_050 resnet18 \
+            efficientnet_b0 densenet121 mobilenetv3_small_050 qwen qwen_q4 qwen3_q4
+      - name: Compare Qwen3.5 text and image-plus-text pipelines
+        run: |
+          runner=(--runner "$RUNNER_TEMP/${{ matrix.runner }}" ${{ matrix.options }})
+          python tool/verify_qwen35.py "${runner[@]}" --cache "$RUNNER_TEMP/models/qwen35"
+          python tool/verify_qwen35.py "${runner[@]}" --cache "$RUNNER_TEMP/models/qwen35" --image
