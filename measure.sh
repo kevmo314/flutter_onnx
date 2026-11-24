@@ -68,7 +68,13 @@ for (( attempt=0; attempt<180; ++attempt )); do
     python3 - "$RUNNER_TEMP/playback.jsonl" <<'PYTHON'
 import json, sys
 with open(sys.argv[1]) as f:
-    rows = [r for line in f if "rtf" in (r := json.loads(line))]
+    results = [json.loads(line) for line in f]
+rows = [r for r in results if "rtf" in r]
+playback = [r for r in results if "first_audio_ms" in r]
+if len(rows) == 3:
+    for r in playback:
+        overhead = r["done_ms"] - r["first_audio_ms"] - rows[0]["audio_ms"]
+        print(f"Playback round {r['round']}: {overhead:.0f} ms beyond PCM duration after first audio")
 if len(rows) != 3 or any(not 0 < r["rtf"] < 1 for r in rows):
     raise SystemExit(f"Missed the real-time synthesis budget: {rows}")
 PYTHON
