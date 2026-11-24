@@ -594,7 +594,7 @@ index 52603ba..f8b1436 100644
  }
 diff --git a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/FlutterGraphs.kt b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/FlutterGraphs.kt
 new file mode 100644
-index 0000000..ea62a6d
+index 0000000..71f9595
 --- /dev/null
 +++ b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/FlutterGraphs.kt
 @@ -0,0 +1,58 @@
@@ -643,8 +643,8 @@ index 0000000..ea62a6d
 +        return reply.get()
 +    }
 +
-+    fun open(file: File): GraphSession {
-+        val id = call("open", file.absolutePath) as Number
++    fun open(file: File, threads: Int): GraphSession {
++        val id = call("open", mapOf("path" to file.absolutePath, "threads" to threads)) as Number
 +        return object : GraphSession {
 +            override fun run(inputs: Map<String, GraphTensor>): GraphTensor {
 +                val tensors = inputs.mapValues { (_, t) -> mapOf("shape" to t.shape.toList(), "data" to t.data) }
@@ -670,7 +670,7 @@ index f1a0119..32618a4 100644
          methods = MethodChannel(binding.binaryMessenger, OnnxTtsChannelHandler.METHOD_CHANNEL).also {
              it.setMethodCallHandler { call, result ->
 diff --git a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/OnnxTtsChannelHandler.kt b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/OnnxTtsChannelHandler.kt
-index 30d67db..2dc1dfa 100644
+index 30d67db..562de1c 100644
 --- a/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/OnnxTtsChannelHandler.kt
 +++ b/packages/on_device_tts/android/src/main/kotlin/com/muxable/ondevicetts/OnnxTtsChannelHandler.kt
 @@ -1,15 +1,11 @@
@@ -736,7 +736,7 @@ index 30d67db..2dc1dfa 100644
 -                val model = SupertonicModel.load(
 -                    env, File(modelDir), SessionSettings(numThreads, provider),
 -                ) { Log.w(TAG, it) }
-+                val model = SupertonicModel.load(File(modelDir), graphs::open)
++                val model = SupertonicModel.load(File(modelDir)) { file -> graphs.open(file, numThreads) }
                  val handle = "supertonic-${nextHandle.getAndIncrement()}"
                  models[handle] = model
                  Log.i(
@@ -1295,7 +1295,7 @@ index bca516c..4c22e8b 100644
  ## Audio robustness
  
 diff --git a/packages/on_device_tts/doc/native_contract.md b/packages/on_device_tts/doc/native_contract.md
-index 0f68bd4..6843e78 100644
+index 0f68bd4..517e72c 100644
 --- a/packages/on_device_tts/doc/native_contract.md
 +++ b/packages/on_device_tts/doc/native_contract.md
 @@ -1,7 +1,7 @@
@@ -1324,9 +1324,9 @@ index 0f68bd4..6843e78 100644
 -and logs it (Android: logcat tag `OnDeviceTts`); this is not an error. Once a
 -provider has failed for one of the model's files, the rest of that model's
 -files load on `cpu` too.
-+The plugin accepts legacy provider and thread-count preferences. Each graph runs
-+in its own Dart isolate using the CPU backend. `numThreads` is validated at load
-+time. The backend controls its own threading.
++Each graph runs in its own Dart isolate using the CPU backend. On Android,
++`numThreads` limits workers for large matrix products. On iOS, Accelerate
++schedules those products. The plugin accepts legacy provider preferences.
  
  Errors: `load_failed` for an unknown `modelType`, a missing directory or
 -file, unreadable JSON, or a model that ONNX Runtime can't load.
@@ -1417,7 +1417,7 @@ index d49ee58..29976d6 100644
    s.static_framework = true
  
 diff --git a/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Package.swift b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Package.swift
-index c3167db..9463197 100644
+index c3167db..d8e985e 100644
 --- a/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Package.swift
 +++ b/packages/on_device_tts/ios/on_device_tts/OnDeviceTtsCore/Package.swift
 @@ -1,7 +1,7 @@
@@ -1429,14 +1429,16 @@ index c3167db..9463197 100644
  // plugin (`../../on_device_tts.podspec`) compiles these same sources with
  // CocoaPods; this package exists so they can be tested on their own:
  //
-@@ -20,20 +20,17 @@ let package = Package(
+@@ -20,20 +20,18 @@ let package = Package(
      .library(name: "OnDeviceTtsCore", targets: ["OnDeviceTtsCore"])
    ],
    dependencies: [
 -    // ONNX Runtime (MIT). The same version as the podspec's
 -    // onnxruntime-objc, so tests run the binary the app ships.
-+    // Independent graph evaluator for standalone Swift tests.
-     .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager", exact: "1.24.2")
+-    .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager", exact: "1.24.2")
++    // Test-only mirror of 1.24.2. This revision updates archive URLs and retains
++    // the upstream SHA-256 checksums and Objective-C sources.
++    .package(url: "https://github.com/thesagezm/onnxruntime-swift-package-manager", revision: "7dbd851c52a6e3889077f69dda8c9f8f438b60ab")
    ],
    targets: [
      .target(
@@ -2008,10 +2010,10 @@ index 36d8f30..af615a2 100644
  
 diff --git a/packages/on_device_tts/lib/src/onnx/graph_worker.dart b/packages/on_device_tts/lib/src/onnx/graph_worker.dart
 new file mode 100644
-index 0000000..194b01c
+index 0000000..9ee228f
 --- /dev/null
 +++ b/packages/on_device_tts/lib/src/onnx/graph_worker.dart
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,151 @@
 +// One worker owns each loaded graph. Model weights never cross isolate ports.
 +import 'dart:async';
 +import 'dart:io';
@@ -2032,7 +2034,10 @@ index 0000000..194b01c
 +  _channel.setMethodCallHandler((call) async {
 +    switch (call.method) {
 +      case 'open':
-+        final graph = await _GraphWorker.open(call.arguments as String);
++        final args = call.arguments;
++        final path = args is String ? args : (args as Map)['path'] as String;
++        final threads = args is Map ? args['threads'] as int : 2;
++        final graph = await _GraphWorker.open(path, threads);
 +        final id = ++_nextGraph;
 +        _graphs[id] = graph;
 +        return id;
@@ -2060,13 +2065,13 @@ index 0000000..194b01c
 +  int _sequence = 0;
 +  bool _closed = false;
 +
-+  static Future<_GraphWorker> open(String path) async {
++  static Future<_GraphWorker> open(String path, int threads) async {
 +    final worker = _GraphWorker();
 +    worker._replies.listen(worker._receive);
 +    try {
 +      worker._isolate = await Isolate.spawn(
 +        _serveGraph,
-+        (path, worker._replies.sendPort),
++        (path, threads, worker._replies.sendPort),
 +        onExit: worker._replies.sendPort,
 +        onError: worker._replies.sendPort,
 +      );
@@ -2117,13 +2122,15 @@ index 0000000..194b01c
 +  }
 +}
 +
-+void _serveGraph((String, SendPort) request) async {
-+  final (path, parent) = request;
++void _serveGraph((String, int, SendPort) request) async {
++  final (path, threads, parent) = request;
 +  final graph = OnnxSession.fromBytes(File(path).readAsBytesSync());
 +  // A tiny difference in predicted duration can change the integer PCM
 +  // length. Use the same Dart arithmetic for this graph on both platforms.
 +  final backend =
-+      graph.outputs.containsKey('duration') ? null : const NativeCpuBackend();
++      graph.outputs.containsKey('duration')
++          ? null
++          : NativeCpuBackend(maxThreads: threads);
 +  final commands = ReceivePort();
 +  parent.send(commands.sendPort);
 +  await for (final dynamic message in commands) {
@@ -2218,7 +2225,7 @@ index 65eb34d..14d25f8 100644
  // alternative. Models requiring phonemes need a separate engine integration.
  //
 diff --git a/packages/on_device_tts/pubspec.yaml b/packages/on_device_tts/pubspec.yaml
-index f6b7f11..76216dd 100644
+index f6b7f11..50dab2b 100644
 --- a/packages/on_device_tts/pubspec.yaml
 +++ b/packages/on_device_tts/pubspec.yaml
 @@ -1,15 +1,24 @@
@@ -2239,18 +2246,18 @@ index f6b7f11..76216dd 100644
 +  flutter_onnx:
 +    git:
 +      url: https://github.com/kevmo314/flutter_onnx.git
-+      ref: 15940d38eaf429805a78455fa1d2d3ee9a1c734a
++      ref: d685353c1b657a586106d6844abe2e5c281a7155
 +  flutter_onnx_cpu:
 +    git:
 +      url: https://github.com/kevmo314/flutter_onnx.git
 +      path: cpu
-+      ref: 15940d38eaf429805a78455fa1d2d3ee9a1c734a
++      ref: d685353c1b657a586106d6844abe2e5c281a7155
    background_downloader: ^9.6.4
    crypto: ^3.0.7
    flutter:
 diff --git a/packages/on_device_tts/test/graph_worker_test.dart b/packages/on_device_tts/test/graph_worker_test.dart
 new file mode 100644
-index 0000000..26ac504
+index 0000000..b3bae0f
 --- /dev/null
 +++ b/packages/on_device_tts/test/graph_worker_test.dart
 @@ -0,0 +1,200 @@
@@ -2301,7 +2308,7 @@ index 0000000..26ac504
 +          'CA46OgoOCgF4CgF4EgF5IgNBZGQSBmRvdWJsZVoPCgF4EgoKCAgBEgQKAggCYg8KAXkSCgoICAESBAoCCAJCBAoAEBI=',
 +        ),
 +      );
-+      final id = await call('open', file.path) as int;
++      final id = await call('open', {'path': file.path, 'threads': 1}) as int;
 +      await expectLater(
 +        runGraph(id, {
 +          'x': tensor([2], Uint8List(8)),
@@ -2455,7 +2462,7 @@ index 0000000..26ac504
 +  );
 +}
 diff --git a/pubspec.lock b/pubspec.lock
-index 8ecf368..9459fda 100644
+index 8ecf368..d7b814d 100644
 --- a/pubspec.lock
 +++ b/pubspec.lock
 @@ -9,6 +9,14 @@ packages:
@@ -2494,8 +2501,8 @@ index 8ecf368..9459fda 100644
 +    dependency: transitive
 +    description:
 +      path: "."
-+      ref: "15940d38eaf429805a78455fa1d2d3ee9a1c734a"
-+      resolved-ref: "15940d38eaf429805a78455fa1d2d3ee9a1c734a"
++      ref: d685353c1b657a586106d6844abe2e5c281a7155
++      resolved-ref: d685353c1b657a586106d6844abe2e5c281a7155
 +      url: "https://github.com/kevmo314/flutter_onnx.git"
 +    source: git
 +    version: "0.1.0"
@@ -2503,8 +2510,8 @@ index 8ecf368..9459fda 100644
 +    dependency: transitive
 +    description:
 +      path: cpu
-+      ref: "15940d38eaf429805a78455fa1d2d3ee9a1c734a"
-+      resolved-ref: "15940d38eaf429805a78455fa1d2d3ee9a1c734a"
++      ref: d685353c1b657a586106d6844abe2e5c281a7155
++      resolved-ref: d685353c1b657a586106d6844abe2e5c281a7155
 +      url: "https://github.com/kevmo314/flutter_onnx.git"
 +    source: git
 +    version: "0.1.0"

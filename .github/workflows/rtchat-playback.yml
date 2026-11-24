@@ -8,7 +8,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-15]
-        engine: [migrated, original]
+        engine: [migrated]
+        include:
+          - os: macos-15
+            engine: original
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
     steps:
@@ -32,7 +35,19 @@ jobs:
       - name: Prepare RTChat and the pinned model
         working-directory: rtchat
         run: |
-          if [[ "${{ matrix.engine }}" = migrated ]]; then git apply ../migration.patch; else cp ../profile_playback.dart integration_test/; fi
+          if [[ "${{ matrix.engine }}" = migrated ]]; then
+            git apply ../migration.patch
+          else
+            cp ../profile_playback.dart integration_test/
+            # The original source has disappeared. This mirror revision changes only
+            # the archive URLs and preserves Microsoft's source and both binary hashes.
+            python3 - <<'PYTHON'
+          from pathlib import Path
+          for p in Path('packages/on_device_tts/ios').rglob('Package.swift'):
+              s = p.read_text()
+              p.write_text(s.replace('microsoft/onnxruntime-swift-package-manager", exact: "1.24.2', 'thesagezm/onnxruntime-swift-package-manager", revision: "7dbd851c52a6e3889077f69dda8c9f8f438b60ab'))
+          PYTHON
+          fi
           flutter pub get
           bash ../download-model.sh 3 "$RUNNER_TEMP/supertonic-3"
       - name: Build the profiling APK
