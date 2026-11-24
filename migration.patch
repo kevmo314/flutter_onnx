@@ -633,10 +633,10 @@ index a92a152..e1fe841 100644
      expect(done, greaterThan(audioLength - const Duration(milliseconds: 50)));
 diff --git a/integration_test/profile_playback.dart b/integration_test/profile_playback.dart
 new file mode 100644
-index 0000000..608625c
+index 0000000..00e3b3b
 --- /dev/null
 +++ b/integration_test/profile_playback.dart
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,121 @@
 +// Flutter entry point for a cold and two warm runs through the native player.
 +// Stage supertonic-3 in the app's documents directory.
 +import 'dart:convert';
@@ -723,7 +723,10 @@ index 0000000..608625c
 +        )) {
 +          clock.stop();
 +          final seconds = audio.pcm.length / audio.sampleRate;
-+          if (seconds <= 0) throw StateError('Empty audio for segment $i');
++          if (seconds <= 0)
++            throw StateError(
++              'Empty audio for phrase ${segmentMicros.length + 1}',
++            );
 +          samples += audio.pcm.length;
 +          audioSeconds += seconds;
 +          segmentMicros.add(clock.elapsedMicroseconds);
