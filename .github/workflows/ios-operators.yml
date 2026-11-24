@@ -40,6 +40,7 @@ jobs:
           cd rtchat
           git apply ../harness/migration.patch
           python3 ../harness/trace-graphs.py
+          python3 ../capture-worker.py
           cat > pubspec_overrides.yaml <<'EOF'
           dependency_overrides:
             flutter_onnx:
@@ -56,7 +57,10 @@ jobs:
         run: |
           file rtchat/build/ios/iphonesimulator/Runner.app/Runner
           tail -c 1300 "$RUNNER_TEMP/playback.jsonl" || true
-          grep -E 'OPS |GRAPH_US' "$RUNNER_TEMP/device.log" > "$RUNNER_TEMP/operators.log" || true
+          dir=$(xcrun simctl get_app_container booted com.rtirl.chat data)/Documents
+          cp "$dir/operators.log" "$RUNNER_TEMP/operators.log"
+          grep -q 'OPS denoised_latent' "$RUNNER_TEMP/operators.log"
+          grep -q 'GRAPH_US vocoder.onnx' "$RUNNER_TEMP/operators.log"
           wc -l "$RUNNER_TEMP/operators.log"
       - uses: actions/upload-artifact@v4
         if: always()
