@@ -30,6 +30,30 @@ void main() {
       }
     }
   });
+  test(
+    'parallel row ranges match a serial product with irregular dimensions',
+    () async {
+      const m = 321, k = 257, n = 257;
+      final a = Float32List.fromList(
+        List.generate(m * k, (i) => (i % 7 - 3).toDouble()),
+      );
+      final b = Float32List.fromList(
+        List.generate(k * n, (i) => (i % 11 - 5).toDouble()),
+      );
+      final serial = await const NativeCpuBackend(
+        maxThreads: 1,
+      ).multiply(a, b, rows: m, inner: k, columns: n);
+      final parallel = await backend.multiply(
+        a,
+        b,
+        rows: m,
+        inner: k,
+        columns: n,
+      );
+      expect(parallel, orderedEquals(serial!));
+    },
+  );
+
   test('matrix operands broadcast across independent batch axes', () async {
     final graph = OnnxSession.fromBytes(
       base64Decode(
@@ -51,33 +75,30 @@ void main() {
     expect(nodes, hasLength(1));
   });
 
-  test(
-    'batched pointwise convolution shares weights and restores NCL order',
-    () async {
-      final x = Tensor.float32([2, 3, 5], List.generate(30, (i) => i - 11));
-      final w = Tensor.float32([4, 3, 1], List.generate(12, (i) => i % 4 - 2));
-      final bias = Tensor.float32([4], [4, 2, -1, 3]);
-      for (final hasBias in [false, true]) {
-        final graph = OnnxSession.fromBytes(
-          base64Decode(
-            hasBias
-                ? 'CA46gQEKFQoBeAoBdwoEYmlhcxIBeSIEQ29udhIJcG9pbnR3aXNlWhcKAXgSEgoQCAESDAoCCAIKAggDCgIIBVoXCgF3EhIKEAgBEgwKAggECgIIAwoCCAFaEgoEYmlhcxIKCggIARIECgIIBGIXCgF5EhIKEAgBEgwKAggCCgIIBAoCCAVCBAoAEBI='
-                : 'CA46ZwoPCgF4CgF3EgF5IgRDb252Eglwb2ludHdpc2VaFwoBeBISChAIARIMCgIIAgoCCAMKAggFWhcKAXcSEgoQCAESDAoCCAQKAggDCgIIAWIXCgF5EhIKEAgBEgwKAggCCgIIBAoCCAVCBAoAEBI=',
-          ),
-        );
-        final feeds = {'x': x, 'w': w, if (hasBias) 'bias': bias};
-        final accelerated = <String>[];
-        final output = (await graph.runAsync(
-          feeds,
-          backend: backend,
-          onAccelerated: accelerated.add,
-        ))['y']!;
-        expect(output.shape, [2, 4, 5]);
-        expect(output.values, graph.run(feeds)['y']!.values);
-        expect(accelerated, hasLength(1));
-      }
-    },
-  );
+  test('batched pointwise convolution preserves NCL order', () async {
+    final x = Tensor.float32([2, 3, 5], List.generate(30, (i) => i - 11));
+    final w = Tensor.float32([4, 3, 1], List.generate(12, (i) => i % 4 - 2));
+    final bias = Tensor.float32([4], [4, 2, -1, 3]);
+    for (final hasBias in [false, true]) {
+      final graph = OnnxSession.fromBytes(
+        base64Decode(
+          hasBias
+              ? 'CA46gQEKFQoBeAoBdwoEYmlhcxIBeSIEQ29udhIJcG9pbnR3aXNlWhcKAXgSEgoQCAESDAoCCAIKAggDCgIIBVoXCgF3EhIKEAgBEgwKAggECgIIAwoCCAFaEgoEYmlhcxIKCggIARIECgIIBGIXCgF5EhIKEAgBEgwKAggCCgIIBAoCCAVCBAoAEBI='
+              : 'CA46ZwoPCgF4CgF3EgF5IgRDb252Eglwb2ludHdpc2VaFwoBeBISChAIARIMCgIIAgoCCAMKAggFWhcKAXcSEgoQCAESDAoCCAQKAggDCgIIAWIXCgF5EhIKEAgBEgwKAggCCgIIBAoCCAVCBAoAEBI=',
+        ),
+      );
+      final feeds = {'x': x, 'w': w, if (hasBias) 'bias': bias};
+      final accelerated = <String>[];
+      final output = (await graph.runAsync(
+        feeds,
+        backend: backend,
+        onAccelerated: accelerated.add,
+      ))['y']!;
+      expect(output.shape, [2, 4, 5]);
+      expect(output.values, graph.run(feeds)['y']!.values);
+      expect(accelerated, hasLength(1));
+    }
+  });
 
   test('batched strided dilated convolution agrees with scalar sums', () async {
     final graph = OnnxSession.fromBytes(
