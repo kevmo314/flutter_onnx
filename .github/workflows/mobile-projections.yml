@@ -40,7 +40,13 @@ jobs:
           p=Path('../runtime/cpu/lib/flutter_onnx_cpu.dart')
           s=p.read_text()
           assert s.count('filters >= 128 &&') == 1
-          p.write_text(s.replace('    if ((Platform.isIOS || Platform.isMacOS)', '''    final matches = switch (Platform.environment['ONNX_BNNS_SCOPE']) {
+          s=s.replace('class NativeCpuBackend implements ChannelwiseBackend {', "class NativeCpuBackend implements ChannelwiseBackend {\n  static String projectionMode = 'baseline';")
+          worker=Path('packages/on_device_tts/lib/src/onnx/graph_worker.dart')
+          code=worker.read_text()
+          anchor='  final graph = OnnxSession.fromBytes'
+          assert code.count(anchor)==1
+          worker.write_text(code.replace(anchor,"  NativeCpuBackend.projectionMode = File('${File(path).parent.parent.parent.path}/projection-mode').readAsStringSync().trim();\n"+anchor))
+          p.write_text(s.replace('    if ((Platform.isIOS || Platform.isMacOS)', '''    final matches = switch (NativeCpuBackend.projectionMode) {
                 'all' => true,
                 'batched' => batch > 1,
                 'contract' => batch > 1 && !gelu && channels >= filters,
@@ -69,11 +75,17 @@ jobs:
           docs=$(xcrun simctl get_app_container "$SIM" com.rtirl.chat data)/Documents
           mkdir -p "$docs" "$RUNNER_TEMP/result"
           cp -R "$RUNNER_TEMP/supertonic-3" "$RUNNER_TEMP/reference" "$docs/"
-          for mode in all batched contract expand baseline; do
+          # Capture the simulator and build services competing with inference.
+          (while true; do date -u; ps -A -o pcpu=,pid=,comm= | sort -nr | head -15 || true; sleep 15; done) > "$RUNNER_TEMP/result/processes.log" &
+          monitor=$!
+          trap 'kill "$monitor" || true' EXIT
+          for mode in contract all batched expand baseline; do
             rm -f "$docs/oracle.jsonl" "$docs/playback.jsonl"
-            SIMCTL_CHILD_ONNX_BNNS_SCOPE="$mode" xcrun simctl launch --terminate-running-process "$SIM" com.rtirl.chat
+            echo "$mode" > "$docs/projection-mode"
+            xcrun simctl launch --terminate-running-process --stdout="$RUNNER_TEMP/result/$mode-stdout.log" --stderr="$RUNNER_TEMP/result/$mode-stderr.log" "$SIM" com.rtirl.chat
             for ((i=0; i<100; ++i)); do
               if grep -Eq '"complete":true|"error":' "$docs/oracle.jsonl" 2>/dev/null; then break; fi
+              if ((i % 12 == 0)); then tail -3 "$docs/oracle.jsonl" || true; fi
               sleep 5
             done
             cp "$docs/oracle.jsonl" "$RUNNER_TEMP/result/$mode-oracle.jsonl"

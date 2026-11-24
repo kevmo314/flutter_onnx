@@ -11,9 +11,11 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final dir = await getApplicationDocumentsDirectory();
   final result = File('${dir.path}/oracle.jsonl');
-  final env = Platform.environment['ONNX_BNNS_SCOPE']!;
+  result.writeAsStringSync('');
+  final env = File('${dir.path}/projection-mode').readAsStringSync().trim();
   void log(Map data) => result.writeAsStringSync('${jsonEncode(data)}\n',mode:FileMode.append,flush:true);
   try {
+    log({'started':true,'mode':env});
     final root = '${dir.path}/reference';
     final manifest = jsonDecode(File('$root/manifest.json').readAsStringSync()) as Map;
     final tts = await OnnxTts.load(modelDir:'${dir.path}/supertonic-3');
