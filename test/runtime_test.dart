@@ -37,6 +37,25 @@ class _Backend implements MatMulBackend {
 }
 
 void main() {
+  test(
+      'expanded GELU preserves rounding, exposed intermediates and overridable constants',
+      () {
+    final fused = OnnxSession.fromBytes(base64Decode(
+        'CA46sgEKEAoBeAoBZBIDZGl2IgNEaXYKDwoDZGl2EgNlcmYiA0VyZgoUCgNlcmYKA29uZRIDYWRkIgNBZGQKEgoBeAoDYWRkEgNtdWwiA011bAoTCgNtdWwKBGhhbGYSAXkiA011bBIEZ2VsdSoLEAEiBPMEtT9CAWQqDRABIgQAAIA/QgNvbmUqDhABIgQAAAA/QgRoYWxmWg0KAXgSCAoGCAESAgoAYg0KAXkSCAoGCAESAgoAQgQKABAS'));
+    final exposed = OnnxSession.fromBytes(base64Decode(
+        'CA460wEKEAoBeAoBZBIDZGl2IgNEaXYKDwoDZGl2EgNlcmYiA0VyZgoUCgNlcmYKA29uZRIDYWRkIgNBZGQKEgoBeAoDYWRkEgNtdWwiA011bAoTCgNtdWwKBGhhbGYSAXkiA011bBIEZ2VsdSoLEAEiBPMEtT9CAWQqDRABIgQAAIA/QgNvbmUqDhABIgQAAAA/QgRoYWxmWg0KAXgSCAoGCAESAgoAWg4KBGhhbGYSBgoECAESAGINCgF5EggKBggBEgIKAGIPCgNlcmYSCAoGCAESAgoAQgQKABAS'));
+    final x = Tensor.float32([513], List.generate(513, (i) => (i - 256) / 37));
+    final actual = fused.run({'x': x})['y']!;
+    final reference = exposed.run({'x': x});
+    expect(actual.toBytes(), reference['y']!.toBytes());
+    expect(reference['erf']!.values[256], 0);
+    final scaled = exposed.run({
+      'x': x,
+      'half': Tensor.float32([], [2])
+    });
+    expect(scaled['y']!.values, actual.values.map((v) => v * 4).toList());
+  });
+
   test('tied weights produce the same projection on CPU and device', () async {
     final session = OnnxSession.fromBytes(
         base64Decode(supplementalModels['tied_weights']!));

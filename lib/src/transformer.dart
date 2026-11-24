@@ -206,6 +206,20 @@ List<Tensor> _executeNode(_Node n, List<Tensor?> args) {
                 b.values[i] /
                 (1 + math.exp(-n.real('alpha', 1) * x.values[i])))
       ];
+    case _expandedGelu:
+      _require(x!.type == TensorType.float32, 'GELU input must be FLOAT');
+      final source = x.values as Float32List;
+      final out = Float32List(source.length);
+      for (var i = 0; i < out.length; i++) {
+        // Each original node rounds its result to float32.
+        final v = source[i];
+        out[i] = v / _geluDivisor;
+        out[i] = _erf(out[i]);
+        out[i] = out[i] + 1;
+        out[i] = v * out[i];
+        out[i] = out[i] * 0.5;
+      }
+      return [Tensor._(x.type, x.shape, out.asUnmodifiableView())];
     case 'Gelu':
     case 'Erf':
       if (n.op == 'Erf' && x!.type == TensorType.float32) {
@@ -240,6 +254,8 @@ double _tanh(double x) {
   final e = math.exp(-2 * x.abs());
   return x.sign * (1 - e) / (1 + e);
 }
+
+const _geluDivisor = 1.4142135381698608; // sqrt(2) rounded to float32.
 
 // Abramowitz & Stegun 7.1.26; maximum absolute approximation error 1.5e-7.
 double _erf(double x) {

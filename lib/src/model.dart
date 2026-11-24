@@ -177,14 +177,11 @@ class OnnxSession {
         captures.add(name);
       }
     }
+    final optimized =
+        _fuseTransposedWeights(nodes, weights, inputs, outputs, uses);
+    final planned = _fuseGelu(optimized, weights, inputs, outputs, uses);
     return OnnxSession._(
-        version,
-        inputs,
-        outputs,
-        weights,
-        _fuseTransposedWeights(nodes, weights, inputs, outputs, uses),
-        uses,
-        captures);
+        version, inputs, outputs, weights, planned, uses, captures);
   }
 
   Map<String, Tensor> run(Map<String, Tensor> feeds) =>
@@ -553,4 +550,63 @@ List<_Node> _fuseTransposedWeights(
     for (final n in nodes)
       if (!removed.contains(n)) replacements[n] ?? n
   ];
+}
+
+// Exporters express exact GELU as five standard nodes. Fuse only private
+// intermediates and scalar FLOAT initializers that callers cannot override.
+const _expandedGelu = '#ExpandedGelu';
+List<_Node> _fuseGelu(
+    List<_Node> nodes,
+    Map<String, Tensor> weights,
+    Map<String, TensorInfo> inputs,
+    Map<String, TensorInfo> outputs,
+    Map<String, int> uses) {
+  final private = <String, _Node>{
+    for (final n in nodes)
+      if (n.function == null &&
+          n.outputs.length == 1 &&
+          uses[n.outputs.single] == 1 &&
+          !outputs.containsKey(n.outputs.single))
+        n.outputs.single: n,
+  };
+  bool scalar(String name, double value) {
+    final w = weights[name];
+    return w != null &&
+        w.type == TensorType.float32 &&
+        w.shape.isEmpty &&
+        !inputs.containsKey(name) &&
+        w.values.single == value;
+  }
+
+  final removed = <_Node>{}, replacements = <_Node, _Node>{};
+  for (final end in nodes) {
+    if (end.op != 'Mul' || end.function != null || !scalar(end.inputs[1], 0.5))
+      continue;
+    final product = private[end.inputs[0]];
+    if (product == null || product.op != 'Mul') continue;
+    final x = product.inputs.first, plus = private[product.inputs[1]];
+    if (plus == null || plus.op != 'Add' || !scalar(plus.inputs[1], 1))
+      continue;
+    final erf = private[plus.inputs.first];
+    if (erf == null || erf.op != 'Erf') continue;
+    final div = private[erf.inputs.single];
+    if (div == null ||
+        div.op != 'Div' ||
+        div.inputs.first != x ||
+        !scalar(div.inputs[1], _geluDivisor)) continue;
+    removed.addAll([div, erf, plus, product]);
+    replacements[end] = _Node(_expandedGelu, end.label, end.outputs, [x], {});
+  }
+  if (replacements.isEmpty) return nodes;
+  final plan = [
+    for (final n in nodes)
+      if (!removed.contains(n)) replacements[n] ?? n
+  ];
+  uses.clear();
+  for (final n in plan) {
+    for (final key in n.references) {
+      uses.update(key, (count) => count + 1, ifAbsent: () => 1);
+    }
+  }
+  return plan;
 }

@@ -75,7 +75,12 @@ class NativeCpuBackend implements MatMulBackend {
     }
     final result = Float32List(rows * columns);
     if (result.isEmpty || inner == 0) return result;
-    if ((Platform.isAndroid || Platform.isLinux) && maxThreads > 1) {
+    // Keep working memory bounded for large embedding and projection tables.
+    final copyBytes =
+        left.lengthInBytes + right.lengthInBytes + result.lengthInBytes;
+    if ((Platform.isAndroid || Platform.isLinux) &&
+        maxThreads > 1 &&
+        copyBytes <= 64 * 1024 * 1024) {
       final threads = [
         maxThreads, Platform.numberOfProcessors, rows ~/ 4,
         // Smaller products are faster without copying or starting workers.
