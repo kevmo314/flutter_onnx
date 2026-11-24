@@ -5,6 +5,7 @@
 #include <string.h>
 #if defined(__APPLE__)
 #include <Accelerate/Accelerate.h>
+#include <dispatch/dispatch.h>
 #elif defined(__linux__)
 #include <pthread.h>
 #endif
@@ -17,23 +18,75 @@
 
 enum { filters_per_tile = 16, frames_per_tile = 6, max_workers = 8 };
 
-static float expanded_gelu(float value) {
-  const float divided = (float)((double)value / 1.4142135381698608);
-  const double x = divided;
-  double erf_value = x;
-  if (x != 0) {
-    const double t = 1.0 / (1.0 + 0.3275911 * fabs(x));
-    const double poly =
-        (((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t -
-           0.284496736) *
-              t +
-          0.254829592) *
-         t);
-    erf_value = copysign(1.0, x) * (1.0 - poly * exp(-x * x));
-  }
-  const float gate = 1.0f + (float)erf_value;
-  return (value * gate) * 0.5f;
+static inline double erf_polynomial(double x) {
+  const double t = 1.0 / (1.0 + 0.3275911 * fabs(x));
+  return (
+      ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) *
+           t +
+       0.254829592) *
+      t);
 }
+
+static inline float finish_gelu(float value, double x, double tail) {
+  const float erf = x == 0 ? x : copysign(1.0 - tail, x);
+  return (value * (1.0f + erf)) * 0.5f;
+}
+
+#ifdef __APPLE__
+// Evaluate the same double-precision exponential in batches through vForce.
+// Div, Erf, Add and both multiplications still round at the original
+// boundaries.
+static void activate_span(float *values, size_t length) {
+  enum { block = 128 };
+  for (size_t s = 0; s < length; s += block) {
+    double x[block], exponent[block], polynomial[block];
+    const int n = length - s < block ? (int)(length - s) : block;
+    for (int i = 0; i < n; ++i) {
+      x[i] = (float)((double)values[s + i] / 1.4142135381698608);
+      exponent[i] = -x[i] * x[i];
+      polynomial[i] = erf_polynomial(x[i]);
+    }
+    vvexp(exponent, exponent, &n);
+    for (int i = 0; i < n; ++i)
+      values[s + i] =
+          finish_gelu(values[s + i], x[i], polynomial[i] * exponent[i]);
+  }
+}
+
+typedef struct {
+  const float *weights, *input, *bias;
+  float *product, *output;
+  int channels, filters, columns, width, batch, workers, gelu;
+} apple_product;
+
+static void apple_rows(void *context, size_t index) {
+  const apple_product *job = context;
+  const int tiles = job->filters / filters_per_tile;
+  const int first = tiles * index / job->workers * filters_per_tile;
+  const int end = tiles * (index + 1) / job->workers * filters_per_tile;
+  cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans, end - first,
+              job->columns, job->channels, 1, job->weights + first,
+              job->filters, job->input, job->columns, 0,
+              job->product + (size_t)first * job->columns, job->columns);
+  for (int b = 0; b < job->batch; ++b) {
+    float *out = job->output + ((size_t)b * job->filters + first) * job->width;
+    for (int f = first; f < end; ++f) {
+      const float *src =
+          job->product + (size_t)f * job->columns + b * job->width;
+      float *dst = out + (size_t)(f - first) * job->width;
+      for (int t = 0; t < job->width; ++t)
+        dst[t] = src[t] + job->bias[f];
+    }
+    if (job->gelu)
+      activate_span(out, (size_t)(end - first) * job->width);
+  }
+}
+#else
+static float expanded_gelu(float value) {
+  const double x = (float)((double)value / 1.4142135381698608);
+  return finish_gelu(value, x, erf_polynomial(x) * exp(-x * x));
+}
+#endif
 
 // Prepare a bounded range of complete output-channel panels. Bias occupies
 // the last row of every panel, so both parameter arrays share one lifetime.
@@ -157,23 +210,31 @@ EXPORT int onnx_pointwise_run(const float *x, const float *weights, float *y,
   }
   // All batches share one parameter matrix. Keep the four-frame tail padded
   // so Accelerate can select a vector kernel even for odd speech lengths.
-  cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans, filters, columns,
-              channels, 1, weights, filters, direct ? x : joined, columns, 0,
-              product, columns);
-  for (int b = 0; b < batch; ++b) {
-    for (int f = 0; f < filters; ++f) {
-      const float *src = product + (size_t)f * columns + b * width;
-      float *dst = y + ((size_t)b * filters + f) * width;
-      for (int t = 0; t < width; ++t) {
-        const float value = src[t] + bias[f];
-        dst[t] = gelu ? expanded_gelu(value) : value;
-      }
-    }
-  }
+  // Splitting a small SGEMM alone adds overhead. With GELU, independent
+  // output ranges also parallelize the activation and NCL output copies.
+  const int parallel = gelu && threads > 1 && filters >= 32 &&
+                       (int64_t)filters * channels * columns >= 8000000;
+  apple_product job = {weights,
+                       direct ? x : joined,
+                       bias,
+                       product,
+                       y,
+                       channels,
+                       filters,
+                       columns,
+                       width,
+                       batch,
+                       parallel ? 2 : 1,
+                       gelu};
+  if (parallel)
+    dispatch_apply_f(job.workers,
+                     dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+                     &job, apple_rows);
+  else
+    apple_rows(&job, 0);
   free(joined);
   if (!direct)
     free(product);
-  (void)threads;
 #elif defined(__linux__) && (defined(__GNUC__) || defined(__clang__))
   const int frames = batch * width;
   const size_t padded = ((size_t)frames + frames_per_tile - 1) /
