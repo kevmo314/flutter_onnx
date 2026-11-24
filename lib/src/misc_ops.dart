@@ -112,3 +112,39 @@ Tensor _decodeImage(_Node n, Tensor x) {
   return Tensor._(TensorType.uint8, [picture.height, picture.width, channels],
       out.asUnmodifiableView());
 }
+
+// MT19937 with the 53-bit uniform conversion used by NumPy RandomState.
+// Keeping the state on the graph node advances it across session calls.
+class _OnnxRandom {
+  final _state = Uint32List(624);
+  int _index = 624;
+  _OnnxRandom(int? seed) {
+    _state[0] = seed ?? math.Random().nextInt(0x100000000);
+    final multiplier = BigInt.from(1812433253);
+    for (var i = 1; i < _state.length; i++) {
+      final x = _state[i - 1];
+      _state[i] = (multiplier * BigInt.from(x ^ (x >>> 30)) + BigInt.from(i))
+          .toUnsigned(32)
+          .toInt();
+    }
+  }
+  int _word() {
+    if (_index == 624) {
+      for (var i = 0; i < 624; i++) {
+        final y =
+            (_state[i] & 0x80000000) | (_state[(i + 1) % 624] & 0x7fffffff);
+        _state[i] =
+            _state[(i + 397) % 624] ^ (y >>> 1) ^ (y.isOdd ? 0x9908b0df : 0);
+      }
+      _index = 0;
+    }
+    var y = _state[_index++];
+    y ^= y >>> 11;
+    y ^= (y << 7) & 0x9d2c5680;
+    y ^= (y << 15) & 0xefc60000;
+    return (y ^ (y >>> 18)).toUnsigned(32);
+  }
+
+  double nextDouble() =>
+      ((_word() >>> 5) * 67108864.0 + (_word() >>> 6)) / 9007199254740992.0;
+}

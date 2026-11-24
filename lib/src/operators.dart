@@ -290,9 +290,9 @@ Tensor _reshape(Tensor x, Tensor pattern, int allowZero) {
   }
   if (infer >= 0) {
     final known = _size(shape);
-    _require(known > 0 && x.values.length % known == 0,
+    _require(known > 0 && x.length % known == 0,
         'Ambiguous or incompatible inferred dimension');
-    shape[infer] = x.values.length ~/ known;
+    shape[infer] = x.length ~/ known;
   }
   return x._reshape(shape);
 }
@@ -352,4 +352,26 @@ Tensor _concat(List<Tensor> tensors, int axis) {
   if (tensors.any((t) => t._wide != null))
     return Tensor.bigInts(first.type, shape, data((t) => t.bigIntValues));
   return Tensor.fromValues(first.type, shape, data((t) => t.values));
+}
+
+List<int> _rowProductShape(Tensor x, Tensor weights) {
+  _require(
+      x.type == weights.type &&
+          x.shape.isNotEmpty &&
+          x.shape.last == weights.shape.last,
+      'Matrix inner dimensions or element types differ');
+  return [...x.shape.take(x.shape.length - 1), weights.shape.first];
+}
+
+Tensor _multiplyWeightRows(Tensor x, Tensor w) {
+  final shape = _rowProductShape(x, w),
+      left = x.values as Float32List,
+      right = w.values as Float32List;
+  final inner = w.shape[1], cols = w.shape[0];
+  return _float(shape, (i) {
+    final a = i ~/ cols * inner, b = i % cols * inner;
+    var sum = 0.0;
+    for (var k = 0; k < inner; k++) sum += left[a + k] * right[b + k];
+    return sum;
+  });
 }

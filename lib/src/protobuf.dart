@@ -119,8 +119,7 @@ class _Proto {
   }
 }
 
-Tensor _tensor(_Proto p,
-    {bool sliceBound = false, Map<String, Uint8List> externalData = const {}}) {
+Tensor _tensor(_Proto p, {Map<String, Uint8List> externalData = const {}}) {
   if (p.has(3)) throw UnsupportedError('Segmented tensor data');
   final shape = p.ints(1).toList();
   final type = _type(p.integer(2));
@@ -153,12 +152,10 @@ Tensor _tensor(_Proto p,
     if (start > file.length || length < 0 || length > file.length - start)
       throw FormatException('External tensor range exceeds $location');
     return _decodeRaw(
-        type, shape, Uint8List.sublistView(file, start, start + length),
-        sliceBound: sliceBound);
+        type, shape, Uint8List.sublistView(file, start, start + length));
   }
   if (type == TensorType.string) return Tensor.strings(shape, p.strings(6));
-  if (p.has(9))
-    return _decodeRaw(type, shape, p.bytes(9), sliceBound: sliceBound);
+  if (p.has(9)) return _decodeRaw(type, shape, p.bytes(9));
   if (type.compact) {
     final codes = p.ints(5).toList();
     if (type.bitWidth == 2 || type.bitWidth == 4)
@@ -170,9 +167,7 @@ Tensor _tensor(_Proto p,
     final signed = type == TensorType.int64;
     final integers = p.wideInts(signed ? 7 : 11).map((v) {
       final value = signed ? v.toSigned(64) : v.toUnsigned(64);
-      return sliceBound && value.abs() > BigInt.from(_maxSafe)
-          ? BigInt.from(value.sign * _maxSafe)
-          : value;
+      return value;
     });
     return Tensor.bigInts(type, shape, integers);
   }

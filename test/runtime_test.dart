@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter_onnx/flutter_onnx.dart';
 import 'package:test/test.dart';
 import 'vectors.dart';
+import 'supplemental_models.dart';
 
 Tensor tensor(List<dynamic> spec) {
   final dims = (spec[1] as List).cast<int>();
@@ -36,6 +37,19 @@ class _Backend implements MatMulBackend {
 }
 
 void main() {
+  test('tied weights produce the same projection on CPU and device', () async {
+    final session = OnnxSession.fromBytes(
+        base64Decode(supplementalModels['tied_weights']!));
+    final feeds = {
+      'x': Tensor.float32([2, 2], [1, 3, 4, 0])
+    };
+    final expected = [-2, 14, 3, 4, 8, -12], dispatched = <String>[];
+    expect(session.run(feeds)['scores']!.values, expected);
+    final result = await session.runAsync(feeds,
+        backend: _Backend(), onAccelerated: dispatched.add);
+    expect(result['scores']!.values, expected);
+    expect(dispatched, ['MatMul']);
+  });
   final cases = jsonDecode(vectorsJson) as List;
   for (final c in cases) {
     test('ONNX reference: ${c['name']}', () async {

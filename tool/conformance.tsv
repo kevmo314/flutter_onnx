@@ -48,7 +48,7 @@ DepthToSpace	2	2
 DequantizeLinear	14	14
 Det	2	2
 Div	10	10
-Dropout	8	12
+Dropout	12	12
 DynamicQuantizeLinear	3	3
 Einsum	9	9
 Elu	3	3
@@ -163,7 +163,7 @@ SequenceEmpty	0	0
 SequenceErase	0	0
 SequenceInsert	2	2
 SequenceLength	0	0
-SequenceMap	2	6
+SequenceMap	6	6
 Shape	11	11
 Shrink	2	2
 Sigmoid	2	2

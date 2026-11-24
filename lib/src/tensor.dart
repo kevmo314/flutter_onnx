@@ -356,8 +356,7 @@ void _require(bool condition, String message) {
   if (!condition) throw ArgumentError(message);
 }
 
-Tensor _decodeRaw(TensorType type, List<int> shape, Uint8List bytes,
-    {bool sliceBound = false}) {
+Tensor _decodeRaw(TensorType type, List<int> shape, Uint8List bytes) {
   final count = _size(shape),
       width = type.bytesPerElement,
       d = ByteData.sublistView(bytes),
@@ -413,8 +412,6 @@ Tensor _decodeRaw(TensorType type, List<int> shape, Uint8List bytes,
           : d.getUint32(p + 4, Endian.little);
       final value =
           (BigInt.from(hi) << 32) | BigInt.from(d.getUint32(p, Endian.little));
-      if (sliceBound && value.abs() > BigInt.from(_maxSafe))
-        return BigInt.from(value.sign * _maxSafe);
       return value;
     });
     return Tensor.bigInts(type, shape, numbers);

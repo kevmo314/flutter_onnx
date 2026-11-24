@@ -45,7 +45,9 @@ class TensorInfo {
       if (value is! OnnxSequence)
         throw ArgumentError('$name expects a sequence');
       for (final item in value.elements) {
-        element!._check(item, symbols);
+        // A sequence may contain tensors of different shapes. Symbols first
+        // encountered inside an element bind within that element.
+        element!._check(item, {...symbols});
       }
       return;
     }
@@ -123,25 +125,12 @@ class OnnxSession {
         .messages(1)
         .map((p) => _Node.read(p, version, externalData, functions))
         .toList();
-    final sliceBounds = <String>{};
-    final otherUses = {...inputs.keys, ...outputs.keys};
-    for (final n in nodes) {
-      for (final (i, name) in n.inputs.indexed) {
-        if (n.op == 'Slice' && (i == 1 || i == 2)) {
-          sliceBounds.add(name);
-        } else {
-          otherUses.add(name);
-        }
-      }
-    }
-    sliceBounds.removeAll(otherUses);
     final weights = <String, Tensor>{};
     for (final t in graph.messages(5)) {
       final name = t.string(8);
       if (name.isEmpty || weights.containsKey(name))
         throw FormatException('Invalid initializer name "$name"');
-      weights[name] = _tensor(t,
-          externalData: externalData, sliceBound: sliceBounds.contains(name));
+      weights[name] = _tensor(t, externalData: externalData);
     }
     for (final sparse in graph.messages(15)) {
       final name = sparse.message(1).string(8);
@@ -173,7 +162,13 @@ class OnnxSession {
       }
     }
     return OnnxSession._(
-        version, inputs, outputs, weights, nodes, uses, captures);
+        version,
+        inputs,
+        outputs,
+        weights,
+        _fuseTransposedWeights(nodes, weights, inputs, outputs, uses),
+        uses,
+        captures);
   }
 
   Map<String, Tensor> run(Map<String, Tensor> feeds) =>
@@ -200,9 +195,10 @@ class OnnxSession {
     final frame = _Frame(this, feeds, {});
     for (final node in _nodes) {
       final args = frame.args(node);
-      final product = (node.op == 'MatMul' || node.op == 'Gemm')
-          ? await _tryAccelerate(node, args.cast<Tensor?>(), backend)
-          : null;
+      final product =
+          (node.op == 'MatMul' || node.op == 'Gemm' || node.op == _rowProduct)
+              ? await _tryAccelerate(node, args.cast<Tensor?>(), backend)
+              : null;
       if (product != null) onAccelerated?.call(node.label);
       frame.store(node,
           product == null ? _valueNode(node, args, frame.values) : [product]);
@@ -222,6 +218,25 @@ abstract interface class MatMulBackend {
 
 Future<Tensor?> _tryAccelerate(
     _Node node, List<Tensor?> args, MatMulBackend backend) async {
+  if (node.op == _rowProduct) {
+    final input = args[0]!, weights = args[1]!;
+    final dims = _rowProductShape(input, weights);
+    final rows = _size(input.shape.take(input.shape.length - 1)),
+        inner = input.shape.last,
+        columns = weights.shape.first;
+    if (rows == 0 || inner == 0 || columns == 0) return null;
+    final rhs = _transpose(input._reshape([rows, inner]), [1, 0]);
+    final data = await backend.multiply(
+        weights.values as Float32List, rhs.values as Float32List,
+        rows: columns, inner: inner, columns: rows);
+    if (data == null) return null;
+    if (data.length != rows * columns)
+      throw StateError('${backend.name} returned an incorrect matrix length');
+    return _transpose(
+        Tensor._(
+            TensorType.float32, [columns, rows], data.asUnmodifiableView()),
+        [1, 0])._reshape(dims);
+  }
   if (node.op != 'MatMul' && node.op != 'Gemm') return null;
   var a = args[0]!, b = args[1]!;
   if (a.type != TensorType.float32 ||
@@ -317,7 +332,7 @@ class _Node {
   final List<String> outputs;
   final List<String> inputs;
   final Map<String, Object> attrs;
-  late final math.Random random = math.Random((attrs["seed"] as num?)?.toInt());
+  late final _OnnxRandom random = _OnnxRandom((attrs["seed"] as num?)?.toInt());
   final _FunctionCall? function;
   _Node(this.op, this.label, this.outputs, this.inputs, this.attrs,
       [this.function]);
@@ -339,9 +354,8 @@ class _Node {
     if (call != null)
       return _Node(op, label, p.strings(2), p.strings(1), {}, call);
     final history = _schemas[op];
-    final schema = op == 'com.microsoft::MatMulNBits'
-        ? _matMulNBitsSchema
-        : history?.entries.where((e) => e.key <= opset).lastOrNull?.value;
+    final schema = _extensions[op] ??
+        history?.entries.where((e) => e.key <= opset).lastOrNull?.value;
     if (schema == null)
       throw UnsupportedError('$label: unsupported operator at opset $opset');
     final outs = p.strings(2), ins = p.strings(1);
@@ -423,3 +437,64 @@ const _matMulNBitsSchema = _Schema(
     '1',
     {'K': 2, 'N': 2, 'bits': 2, 'block_size': 2, 'accuracy_level': 2},
     ['K', 'N', 'bits', 'block_size']);
+
+const _extensions = <String, _Schema>{
+  'com.microsoft::MatMulNBits': _matMulNBitsSchema,
+  'com.microsoft::GatherBlockQuantized': _Schema(3, 4, '111?', 1, 1, '1',
+      {'bits': 2, 'block_size': 2, 'gather_axis': 2, 'quantize_axis': 2}, []),
+  'SimplifiedLayerNormalization': _Schema(
+      2, 2, '11', 1, 2, '1?', {'axis': 2, 'epsilon': 1, 'stash_type': 2}, []),
+  'com.microsoft::SkipSimplifiedLayerNormalization':
+      _Schema(3, 4, '111?', 1, 4, '1???', {'epsilon': 1}, []),
+  'com.microsoft::RotaryEmbedding': _Schema(4, 4, '1111', 1, 1, '1',
+      {'num_heads': 2, 'rotary_embedding_dim': 2, 'interleaved': 2}, []),
+  'com.microsoft::GroupQueryAttention':
+      _Schema(7, 11, '111??11????', 1, 3, '1??', {
+    'num_heads': 2,
+    'kv_num_heads': 2,
+    'scale': 1,
+    'softcap': 1,
+    'local_window_size': 2,
+    'do_rotary': 2,
+    'rotary_interleaved': 2
+  }, [
+    'num_heads',
+    'kv_num_heads'
+  ]),
+};
+
+// An embedding table can also be the output projection. Read its contiguous
+// rows directly to avoid a second, vocabulary-sized buffer for Transpose.
+const _rowProduct = '#MatMulTransposedRhs';
+List<_Node> _fuseTransposedWeights(
+    List<_Node> nodes,
+    Map<String, Tensor> weights,
+    Map<String, TensorInfo> inputs,
+    Map<String, TensorInfo> outputs,
+    Map<String, int> uses) {
+  final candidates = <String, _Node>{};
+  final replacements = <_Node, _Node>{}, removed = <_Node>{};
+  for (final n in nodes) {
+    if (n.op == 'Transpose') {
+      final name = n.inputs.single, w = weights[name], out = n.outputs.single;
+      final perm = n.ints('perm');
+      if (w?.type == TensorType.float32 &&
+          w!.shape.length == 2 &&
+          !inputs.containsKey(name) &&
+          !outputs.containsKey(out) &&
+          uses[out] == 1 &&
+          (perm == null || _sameShape(perm, [1, 0]))) candidates[out] = n;
+    } else if (n.op == 'MatMul') {
+      final transpose = candidates[n.inputs[1]];
+      if (transpose == null) continue;
+      replacements[n] = _Node(_rowProduct, n.label, n.outputs,
+          [n.inputs[0], transpose.inputs.single], {});
+      removed.add(transpose);
+      uses.remove(n.inputs[1]);
+    }
+  }
+  return [
+    for (final n in nodes)
+      if (!removed.contains(n)) replacements[n] ?? n
+  ];
+}

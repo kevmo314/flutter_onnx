@@ -11,6 +11,20 @@ List<int> _indices(Tensor t) {
   return t.values.cast<int>();
 }
 
+// ONNX permits INT64_MAX and INT64_MIN as open Slice boundaries. All legal
+// tensor dimensions fit in 31 bits, so saturation here preserves the slice.
+List<int> _sliceBounds(Tensor t) {
+  if (t._wide == null) return _indices(t);
+  final limit = BigInt.from(0x7fffffff) + BigInt.one;
+  return t._wide
+      .map((v) => v > limit
+          ? limit.toInt()
+          : v < -limit
+              ? -limit.toInt()
+              : v.toInt())
+      .toList();
+}
+
 Tensor? _arrayOp(_Node n, List<Tensor?> args) {
   final x = args.first!, shape = x.shape;
   switch (n.op) {
@@ -108,7 +122,7 @@ Tensor? _arrayOp(_Node n, List<Tensor?> args) {
         return idx;
       });
     case 'Slice':
-      return _slice(x, _indices(args[1]!), _indices(args[2]!),
+      return _slice(x, _sliceBounds(args[1]!), _sliceBounds(args[2]!),
           args.elementAtOrNull(3), args.elementAtOrNull(4));
     case 'Gather':
     case 'GatherElements':
@@ -327,8 +341,9 @@ Tensor _slice(Tensor x, List<int> starts, List<int> ends, Tensor? ax,
     Tensor? stepsTensor) {
   final axes =
       ax == null ? List.generate(starts.length, (i) => i) : _indices(ax);
-  final steps =
-      stepsTensor == null ? List.filled(axes.length, 1) : _indices(stepsTensor);
+  final steps = stepsTensor == null
+      ? List.filled(axes.length, 1)
+      : _sliceBounds(stepsTensor);
   _require([ends, axes, steps].every((a) => a.length == starts.length),
       'Slice input lengths differ');
   final dims = [...x.shape], strides = _strides(x.shape);

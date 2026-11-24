@@ -69,6 +69,59 @@ List<Tensor> _executeNode(_Node n, List<Tensor?> args) {
     case 'Equal':
       if (x!.type == TensorType.string) return _stringOp(n, args);
       return [_execute(n, args)];
+    case _rowProduct:
+      return [_multiplyWeightRows(x!, args[1]!)];
+    case 'SimplifiedLayerNormalization':
+    case 'com.microsoft::SkipSimplifiedLayerNormalization':
+      final skip = n.op.startsWith('com.microsoft');
+      var sum = x!;
+      if (skip) {
+        sum = _binary('Add', sum, args[1]!);
+        final bias = args.elementAtOrNull(3);
+        if (bias != null) sum = _binary('Add', sum, bias);
+      }
+      final rms = _Node(
+          'RMSNormalization', n.label, ['output', 'mean', 'inv'], [], n.attrs);
+      final normalized = _normalize(rms, [sum, args[skip ? 2 : 1]]);
+      return skip ? [...normalized, sum] : [normalized[0], normalized[2]];
+    case 'com.microsoft::RotaryEmbedding':
+      final cos = args[2]!,
+          ids = args[1]!,
+          seq = x!.shape.length == 4 ? x.shape[2] : x.shape[1];
+      final heads = n.integer('num_heads', 0);
+      final attrs = {
+        ...n.attrs,
+        'num_heads': heads != 0 ? heads : x.shape.last ~/ (2 * cos.shape.last)
+      };
+      final positions = ids.shape.length == 1 && ids.length == 1
+          ? Tensor.int64(
+              [x.shape.first, seq],
+              List.generate(x.shape.first * seq,
+                  (i) => ids.values.single.toInt() + i % seq))
+          : ids;
+      return [
+        _rotary(_Node('RotaryEmbedding', n.label, n.outputs, [], attrs),
+            [x, cos, args[3], positions])
+      ];
+    case 'com.microsoft::GroupQueryAttention':
+      final lengths = args[5]!, total = args[6]!.values.single;
+      _require(lengths.values.every((v) => v + 1 == total),
+          'Variable-length GQA cache batches');
+      _require(
+          n.integer('do_rotary', 0) == 0 && args.elementAtOrNull(9) == null,
+          'Fused rotary or position IDs in GQA');
+      final attrs = <String, Object>{
+        'q_num_heads': n.integer('num_heads', 0),
+        'kv_num_heads': n.integer('kv_num_heads', 0),
+        'is_causal': 1,
+        'left_window_size': n.integer('local_window_size', -1),
+        'softcap': n.real('softcap', 0),
+        if (n.real('scale', 0) != 0) 'scale': n.real('scale', 0)
+      };
+      return _attention(_Node('Attention', n.label, n.outputs, [], attrs),
+          [x, args[1], args[2], args.elementAtOrNull(10), args[3], args[4]]);
+    case 'com.microsoft::GatherBlockQuantized':
+      return [_gatherQuantizedRows(n, args)];
     case 'com.microsoft::MatMulNBits':
       return [_matMulNBits(n, args)];
     case 'Attention':
@@ -460,5 +513,53 @@ Tensor _matMulNBits(_Node n, List<Tensor?> args) {
       sum += dot * f[idx];
     }
     return sum;
+  });
+}
+
+Tensor _gatherQuantizedRows(_Node n, List<Tensor?> args) {
+  final data = args[0]!,
+      indices = args[1]!,
+      scales = args[2]!,
+      zeros = args.elementAtOrNull(3);
+  final block = n.integer('block_size', 0), bits = n.integer('bits', 4);
+  _require(
+      bits == 4 &&
+          data.type == TensorType.uint8 &&
+          data.shape.length == 2 &&
+          _axis(n.integer('gather_axis', 0), 2) == 0 &&
+          _axis(n.integer('quantize_axis', 1), 2) == 1 &&
+          block > 0,
+      'Expected 4-bit row embeddings');
+  final rows = data.shape[0],
+      width = data.shape[1] * 2,
+      blocks = (width + block - 1) ~/ block;
+  _require(
+      scales.shape.length == 2 &&
+          (scales.shape[0] == 1 || scales.shape[0] == rows) &&
+          scales.shape[1] == blocks,
+      'Invalid embedding scale shape');
+  if (zeros != null)
+    _require(
+        zeros.shape.length == 2 &&
+            (zeros.shape[0] == 1 || zeros.shape[0] == rows) &&
+            zeros.shape[1] == (blocks + 1) ~/ 2,
+        'Invalid embedding zero-point shape');
+  return _generate(scales.type, [...indices.shape, width], (i) {
+    var row = indices.values[i ~/ width].toInt();
+    if (row < 0) row += rows;
+    if (row < 0 || row >= rows) return 0;
+    final col = i % width, group = col ~/ block;
+    final code = (data.values[row * data.shape[1] + col ~/ 2].toInt() >>
+            (4 * (col % 2))) &
+        15;
+    final zp = zeros == null
+        ? 8
+        : (zeros.values[(zeros.shape[0] == 1 ? 0 : row) * zeros.shape[1] +
+                        group ~/ 2]
+                    .toInt() >>
+                (4 * (group % 2))) &
+            15;
+    return (code - zp) *
+        scales.values[(scales.shape[0] == 1 ? 0 : row) * blocks + group];
   });
 }

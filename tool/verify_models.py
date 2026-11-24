@@ -50,7 +50,10 @@ QWEN_URL = "https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct/resolve/
 
 
 def obtain(name, cache):
-    if name == "qwen_q4":
+    if name == "qwen3_q4":
+        url = "https://huggingface.co/onnx-community/Qwen3-0.6B-ONNX/resolve/79346d370dfae34801d26993fda9ae2372900fd0/onnx/model_q4.onnx"
+        digest = "d43d836fc5e240df9013733ccd214972c5d21bd9ec47e574e4f1e359cf90aed0"
+    elif name == "qwen_q4":
         url, digest = (
             QWEN_URL.replace("/model.onnx", "/model_q4.onnx"),
             "09235a3b1c135cd04ef570e5053b5c079e028078a2cc5f76ba6a251e91bf3296",
@@ -84,6 +87,8 @@ def exchange(
     expected,
     cache_names=None,
     *,
+    external_data=None,
+    capture=None,
     predictions=True,
     atol=1e-4,
     rtol=1e-4,
@@ -108,6 +113,8 @@ def exchange(
         for i, (name, data) in enumerate(feeds.items())
     }
     request = {"model": str(model), "directory": str(folder), "feeds": inputs}
+    if external_data:
+        request["externalData"] = external_data
     if isinstance(proc, DeviceRunner):
         reply = proc.run(request)
     else:
@@ -152,6 +159,8 @@ def exchange(
                 data_type=expected_type, dims=ref.shape, raw_data=path.read_bytes()
             )
             actual = onnx.numpy_helper.to_array(tensor)
+        if capture is not None and name in capture:
+            capture[name] = actual
         if ref.dtype.kind in "biuO" or expected_type in [21, 22, 25, 26]:
             np.testing.assert_array_equal(actual, ref, err_msg=name)
         else:
@@ -188,7 +197,9 @@ def verify(name, model, binary, folder, browser=None, device=None):
         }
         for inp in session.get_inputs():
             if inp.name.startswith("past_key_values"):
-                feeds[inp.name] = np.zeros((1, 2, 0, 64), dtype=np.float32)
+                feeds[inp.name] = np.zeros(
+                    (1, inp.shape[1], 0, inp.shape[3]), dtype=np.float32
+                )
         cases = []
         for step in range(3):
             refs = dict(zip(keys, session.run(None, feeds)))
@@ -244,7 +255,9 @@ def verify(name, model, binary, folder, browser=None, device=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("models", nargs="+", choices=[*MODELS, "qwen", "qwen_q4"])
+    parser.add_argument(
+        "models", nargs="+", choices=[*MODELS, "qwen", "qwen_q4", "qwen3_q4"]
+    )
     parser.add_argument(
         "--browser",
         metavar="CHROMIUM",

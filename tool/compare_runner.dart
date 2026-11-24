@@ -16,7 +16,11 @@ void main(List<String> args) async {
         session = null;
         last = {};
         current = null;
-        session = OnnxSession.fromBytes(File(path).readAsBytesSync());
+        session =
+            OnnxSession.fromBytes(File(path).readAsBytesSync(), externalData: {
+          for (final e in ((request['externalData'] as Map?) ?? {}).entries)
+            e.key as String: File(e.value as String).readAsBytesSync()
+        });
         current = path;
       }
       OnnxValue input(dynamic spec) {
