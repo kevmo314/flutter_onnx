@@ -442,6 +442,34 @@ Tensor _pad(_Node n, List<Tensor?> args) {
   }
   final mode = n.attrs['mode'] ?? 'constant',
       pad = args.elementAtOrNull(2)?.values.single ?? 0;
+  if (x.type == TensorType.float32 &&
+      (mode == 'constant' ||
+          (mode == 'edge' && rank > 0 && x.shape.last > 0)) &&
+      rank > 0 &&
+      start.take(rank - 1).every((p) => p == 0) &&
+      _sameShape(dims.sublist(0, rank - 1), x.shape.sublist(0, rank - 1))) {
+    final output = Float32List(_size(dims));
+    final value = pad.toDouble();
+    if (value != 0 || value.isNegative)
+      output.fillRange(0, output.length, value);
+    final width = x.shape.last, dstWidth = dims.last;
+    final input = x.values as Float32List;
+    final first = (-start.last).clamp(0, width),
+        dest = start.last.clamp(0, dstWidth);
+    final copy = math.min(width - first, dstWidth - dest);
+    for (var dst = 0, src = 0;
+        dst < output.length;
+        dst += dstWidth, src += width) {
+      if (copy > 0)
+        output.setRange(dst + dest, dst + dest + copy, input, src + first);
+      if (mode == 'edge') {
+        output.fillRange(dst, dst + dest, input[src]);
+        output.fillRange(
+            dst + dest + copy, dst + dstWidth, input[src + width - 1]);
+      }
+    }
+    return Tensor._(x.type, dims, output.asUnmodifiableView());
+  }
   final src = _strides(x.shape), dst = _strides(dims);
   return _generate(x.type, dims, (i) {
     var pos = 0;

@@ -217,6 +217,39 @@ Future<Tensor?> _accelerateConv1d(
       columns == width;
   // Cap the temporary lowering buffer. Wide inputs can use the direct kernel.
   if (!direct && inner * columns > 4 * 1024 * 1024) return null;
+  // Apply the same pointwise filters to all batch items in one product.
+  // NCL stores one time span per channel, so concatenate spans along time
+  // before multiplication and restore their batch offsets afterwards.
+  if (direct && batch > 1 && source.length <= 4 * 1024 * 1024) {
+    final span = batch * columns, samples = Float32List(source.length);
+    for (var c = 0; c < channels; c++) {
+      for (var b = 0; b < batch; b++) {
+        final dest = c * span + b * columns;
+        samples.setRange(
+            dest, dest + columns, source, (b * channels + c) * columns);
+      }
+    }
+    final data = await backend.multiply(weights, samples,
+        rows: filters, inner: inner, columns: span);
+    if (data == null) return null;
+    if (data.length != result.length)
+      throw StateError('${backend.name} returned an incorrect matrix length');
+    for (var f = 0; f < filters; f++) {
+      for (var b = 0; b < batch; b++) {
+        final dst = (b * filters + f) * columns, src = f * span + b * columns;
+        if (bias == null) {
+          result.setRange(dst, dst + columns, data, src);
+        } else {
+          final value = bias.values[f].toDouble();
+          for (var j = 0; j < columns; j++) {
+            result[dst + j] = data[src + j] + value;
+          }
+        }
+      }
+    }
+    return Tensor._(
+        x.type, [batch, filters, columns], result.asUnmodifiableView());
+  }
   for (var b = 0; b < batch; b++) {
     final Float32List samples;
     if (direct) {

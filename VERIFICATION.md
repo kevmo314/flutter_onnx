@@ -59,3 +59,9 @@ python tool/verify_models.py --cache /tmp/onnx-models --browser chromium qwen_q4
 ```
 
 Every push and pull request runs both workflows. ONNX compatibility runs randomized differential checks on the Dart VM, then compares the full opset suite, all six classifiers, and the Qwen text and vision models on the VM and in Chromium. Platform inference runs analysis, unit tests, the Flutter web build, a required WebGPU dispatch, and mobile integration tests. Both mobile targets run four-bit Qwen2.5 and Qwen3 and the strict opset suite. Each target uploads its operator report to the workflow run. Physical mobile hardware remains a separate verification target.
+
+### RTChat playback workload
+
+The native CPU CI job profiles Supertonic 3 with RTChat’s three English chat segments, voice M2, five denoising steps and speed 1. It runs the same loaded sessions three times in Dart AOT. The playback-profile artifacts contain per-graph timings, time to the first PCM buffer, and estimated queue drain and starvation times. The queue model lets playback overlap synthesis of later segments. Model loading, platform channel transfers, and audio device buffering are outside these timings.
+
+The profiler compares the entire untrimmed waveform and predicted duration with Supertone. It records any difference in the final trim in samples. The separate multilingual parity tests still require exact trimmed lengths for both voice packs.

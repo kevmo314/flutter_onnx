@@ -36,6 +36,13 @@ jobs:
             python -I "$RUNNER_TEMP/reference.py" "$model" "$RUNNER_TEMP/reference-$version"
             "$RUNNER_TEMP/speech-cli/bundle/bin/supertonic_reference" "$RUNNER_TEMP/reference-$version"
           done
+          python -I test/playback_reference.py "$RUNNER_TEMP/reference.py" "$model" "$RUNNER_TEMP/playback"
+          "$RUNNER_TEMP/speech-cli/bundle/bin/supertonic_reference" --playback "$RUNNER_TEMP/playback" > "$RUNNER_TEMP/playback.log"
+          cat "$RUNNER_TEMP/playback.log"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: playback-profile-${{ matrix.os }}
+          path: ${{ runner.temp }}/playback.log
   web:
     runs-on: ubuntu-latest
     steps:

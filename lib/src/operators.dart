@@ -164,7 +164,21 @@ Tensor _binary(String op, Tensor a, Tensor b) {
   _require(a.type == b.type, "Arithmetic operand types differ");
   if (a.type == TensorType.float32) {
     final left = a.values as Float32List, right = b.values as Float32List;
-    final size = _size(shape), result = Float32List(size);
+    final size = _size(shape);
+    // A repeated all-ones mask leaves the full-sized tensor immutable and intact.
+    if (op == 'Mul' && size > 0) {
+      if (left.length == size &&
+          right.length < size &&
+          right.every((v) => v == 1)) {
+        return a._reshape(shape);
+      }
+      if (right.length == size &&
+          left.length < size &&
+          left.every((v) => v == 1)) {
+        return b._reshape(shape);
+      }
+    }
+    final result = Float32List(size);
     if (size == 0) return Tensor._(a.type, shape, result.asUnmodifiableView());
     final contiguous = (left.length == size || left.length == 1) &&
         (right.length == size || right.length == 1);
@@ -365,6 +379,31 @@ Tensor _transpose(Tensor x, List<int>? perm) {
           perm.every((i) => i >= 0 && i < rank),
       'Invalid permutation $perm');
   final shape = [for (final i in perm) x.shape[i]];
+  // Moving singleton axes does not change storage order. Swapping two
+  // innermost dimensions is common between NCL and layer normalization.
+  final axes = [
+    for (final axis in perm)
+      if (x.shape[axis] != 1) axis
+  ];
+  final ordered = [...axes]..sort();
+  if (_sameShape(axes, ordered)) return x._reshape(shape);
+  final last = axes.length - 1;
+  if (x.type == TensorType.float32 &&
+      last > 0 &&
+      axes[last] == ordered[last - 1] &&
+      axes[last - 1] == ordered[last] &&
+      _sameShape(axes.sublist(0, last - 1), ordered.sublist(0, last - 1))) {
+    final rows = x.shape[ordered[last - 1]], cols = x.shape[ordered[last]];
+    final input = x.values as Float32List, output = Float32List(x.length);
+    for (var base = 0; base < input.length; base += rows * cols) {
+      for (var row = 0; row < rows; row++) {
+        for (var col = 0; col < cols; col++) {
+          output[base + col * rows + row] = input[base + row * cols + col];
+        }
+      }
+    }
+    return Tensor._(x.type, shape, output.asUnmodifiableView());
+  }
   final src = _strides(x.shape), dst = _strides(shape);
   final steps = [for (final i in perm) src[i]];
   return _reorder(x, shape, (flat) {
@@ -390,6 +429,19 @@ Tensor _concat(List<Tensor> tensors, int axis) {
   }
   final stride = _size(shape.skip(ax + 1));
   final outer = _size(shape.take(ax));
+  if (first.type == TensorType.float32) {
+    final output = Float32List(_size(shape));
+    var offset = 0;
+    for (var row = 0; row < outer && offset < output.length; row++) {
+      for (final t in tensors) {
+        final size = t.shape[ax] * stride;
+        output.setRange(
+            offset, offset + size, t.values as Float32List, row * size);
+        offset += size;
+      }
+    }
+    return Tensor._(first.type, shape, output.asUnmodifiableView());
+  }
   Iterable<T> data<T>(List<T> Function(Tensor) elements) sync* {
     if (_size(shape) == 0) return;
     for (var row = 0; row < outer; row++) {

@@ -208,6 +208,14 @@ List<Tensor> _executeNode(_Node n, List<Tensor?> args) {
       ];
     case 'Gelu':
     case 'Erf':
+      if (n.op == 'Erf' && x!.type == TensorType.float32) {
+        final input = x.values as Float32List;
+        final output = Float32List(input.length);
+        for (var i = 0; i < input.length; i++) {
+          output[i] = _erf(input[i]);
+        }
+        return [Tensor._(x.type, x.shape, output.asUnmodifiableView())];
+      }
       return [
         _generate(x!.type, x.shape, (i) {
           final v = x.values[i].toDouble();
@@ -294,31 +302,67 @@ List<Tensor> _normalize(_Node n, List<Tensor?> args) {
   final groups = _size(shape),
       means = Float64List(groups),
       inv = Float64List(groups);
-  for (var g = 0; g < groups; g++) {
-    var mean = 0.0, sq = 0.0;
-    if (!rms) {
-      for (var i = 0; i < width; i++) {
-        mean += x.values[g * width + i];
+  final epsilon = n.real('epsilon', 1e-5);
+  final normalizedShape = x.shape.sublist(axis);
+  late final Tensor out;
+  if (x.type == TensorType.float32 &&
+      scale.type == x.type &&
+      _sameShape(scale.shape, normalizedShape) &&
+      (bias == null ||
+          (bias.type == x.type && _sameShape(bias.shape, normalizedShape)))) {
+    final input = x.values as Float32List,
+        weights = scale.values as Float32List;
+    final offsets = bias?.values as Float32List?;
+    final output = Float32List(input.length);
+    for (var g = 0; g < groups; g++) {
+      final base = g * width;
+      var mean = 0.0, sq = 0.0;
+      if (!rms) {
+        for (var j = 0; j < width; j++) {
+          mean += input[base + j];
+        }
+        mean /= width;
       }
-      mean /= width;
+      for (var j = 0; j < width; j++) {
+        final d = input[base + j] - mean;
+        sq += d * d;
+      }
+      final inverse = 1 / math.sqrt(sq / width + epsilon);
+      means[g] = mean;
+      inv[g] = inverse;
+      for (var j = 0; j < width; j++) {
+        output[base + j] = (input[base + j] - mean) * inverse * weights[j] +
+            (offsets?[j] ?? 0);
+      }
     }
-    for (var i = 0; i < width; i++) {
-      final d = x.values[g * width + i] - mean;
-      sq += d * d;
+    out = Tensor._(x.type, x.shape, output.asUnmodifiableView());
+  } else {
+    for (var g = 0; g < groups; g++) {
+      var mean = 0.0, sq = 0.0;
+      if (!rms) {
+        for (var i = 0; i < width; i++) {
+          mean += x.values[g * width + i];
+        }
+        mean /= width;
+      }
+      for (var i = 0; i < width; i++) {
+        final d = x.values[g * width + i] - mean;
+        sq += d * d;
+      }
+      means[g] = mean;
+      inv[g] = 1 / math.sqrt(sq / width + epsilon);
     }
-    means[g] = mean;
-    inv[g] = 1 / math.sqrt(sq / width + n.real('epsilon', 1e-5));
+    final sm = _IndexMap(scale.shape, x.shape),
+        bm = bias == null ? null : _IndexMap(bias.shape, x.shape);
+    out = _generate(
+        x.type,
+        x.shape,
+        (i) =>
+            (x.values[i] - means[i ~/ width]) *
+                inv[i ~/ width] *
+                scale.values[sm.at(i)] +
+            (bias?.values[bm!.at(i)] ?? 0));
   }
-  final sm = _IndexMap(scale.shape, x.shape),
-      bm = bias == null ? null : _IndexMap(bias.shape, x.shape);
-  final out = _generate(
-      x.type,
-      x.shape,
-      (i) =>
-          (x.values[i] - means[i ~/ width]) *
-              inv[i ~/ width] *
-              scale.values[sm.at(i)] +
-          (bias?.values[bm!.at(i)] ?? 0));
   return [
     out,
     if (n.outputs.length > 1) Tensor.fromValues(stash, shape, means),
