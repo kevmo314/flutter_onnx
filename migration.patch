@@ -61,6 +61,39 @@ index 0000000..25c3fbc
 +  curl -fsSL --retry 3 "https://huggingface.co/Supertone/supertonic-$version/resolve/$revision/$file" -o "$dir/$file"
 +  echo "$sha  $dir/$file" | shasum -a 256 -c -
 +done < <(manifest)
+diff --git a/.github/scripts/prepare-supertonic-android.sh b/.github/scripts/prepare-supertonic-android.sh
+new file mode 100644
+index 0000000..8bed4ef
+--- /dev/null
++++ b/.github/scripts/prepare-supertonic-android.sh
+@@ -0,0 +1,27 @@
++#!/usr/bin/env bash
++# Install the Android artifacts used by the playback CI before Gradle and the emulator start.
++set -euo pipefail
++
++sdk=${ANDROID_HOME:?Android SDK path is required}
++flutter_root=${FLUTTER_ROOT:-$(dirname "$(dirname "$(readlink -f "$(command -v flutter)")")")}
++extension="$flutter_root/packages/flutter_tools/gradle/src/main/kotlin/FlutterExtension.kt"
++ndk=$(sed -nE 's/^[[:space:]]*val ndkVersion: String = "([^"]+)".*/\1/p' "$extension")
++test -n "$ndk" || { echo "Cannot determine the Flutter NDK version from $extension" >&2; exit 1; }
++
++install_package() {
++  local package=$1 required=$2
++  for attempt in 1 2 3; do
++    if [[ -s "$required" ]]; then return 0; fi
++    echo "Installing $package (attempt $attempt)"
++    if "$sdk/cmdline-tools/latest/bin/sdkmanager" --install "$package" && [[ -s "$required" ]]; then
++      return 0
++    fi
++    df -h "$sdk"
++    if [[ "$attempt" != 3 ]]; then sleep 10; fi
++  done
++  echo "Missing $required after installing $package" >&2
++  return 1
++}
++
++install_package "ndk;$ndk" "$sdk/ndk/$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
++install_package 'system-images;android-35;google_apis;x86_64' "$sdk/system-images/android-35/google_apis/x86_64/system.img"
 diff --git a/.github/scripts/profile-supertonic-device.sh b/.github/scripts/profile-supertonic-device.sh
 new file mode 100644
 index 0000000..94a235c
@@ -258,7 +291,7 @@ index 0000000..d2ae998
 +bash .github/scripts/profile-supertonic-device.sh "$1" "$device"
 +exit "$status"
 diff --git a/.github/workflows/on-device-tts-ios.yml b/.github/workflows/on-device-tts-ios.yml
-index 2a93a30..2846aaa 100644
+index 2a93a30..1d3c6c0 100644
 --- a/.github/workflows/on-device-tts-ios.yml
 +++ b/.github/workflows/on-device-tts-ios.yml
 @@ -1,7 +1,7 @@
@@ -362,7 +395,7 @@ index 2a93a30..2846aaa 100644
            if grep -E "Test Case .* skipped" "$RUNNER_TEMP/xctest.log"; then
              echo "::error::tests were skipped"
              exit 1
-@@ -116,24 +99,86 @@ jobs:
+@@ -116,24 +99,89 @@ jobs:
              echo '```'
            } >> "$GITHUB_STEP_SUMMARY"
  
@@ -434,6 +467,9 @@ index 2a93a30..2846aaa 100644
 +          java-version: "21"
 +      - uses: gradle/actions/setup-gradle@v6
 +        if: runner.os == 'Linux'
++      - name: Install the Android NDK and emulator image
++        if: runner.os == 'Linux'
++        run: bash .github/scripts/prepare-supertonic-android.sh
 +      - name: Run Kotlin parity tests against the Python tensors
 +        if: runner.os == 'Linux'
 +        run: |
