@@ -401,8 +401,8 @@ class NativeCpuBackend implements ChannelwiseBackend {
       math.min(maxThreads, Platform.numberOfProcessors),
     );
     _DenseFilter? dense;
-    // A prepared BNNS layer reuses its weight layout across inference calls.
-    // Smaller channel dimensions continue to use the packed BLAS path.
+    // Large projections reuse BNNS or BLAS weights across inference calls.
+    // Smaller channel dimensions use the packed pointwise path.
     if ((Platform.isIOS || Platform.isMacOS) &&
         filters >= 128 &&
         channels >= 128) {
