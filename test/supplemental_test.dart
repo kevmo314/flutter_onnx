@@ -9,6 +9,42 @@ OnnxSession open(String name) =>
     OnnxSession.fromBytes(base64Decode(supplementalModels[name]!));
 
 void main() {
+  test('map interfaces round-trip nested values and full-width keys', () {
+    final graph = open('map_interfaces');
+    final max = (BigInt.one << 64) - BigInt.one;
+    final pair = Tensor.float32([2], [1, 2]);
+    final score = OnnxMap(TensorType.uint64, {max: pair, 1: pair});
+    final label = OnnxMap(TensorType.string, {
+      'cat': Tensor.int64([], [3])
+    });
+    final labels = OnnxSequence([label]);
+    final result = graph.runValues({'scores': score, 'labels': labels});
+    expect(graph.inputs['scores']!.keyType, TensorType.uint64);
+    expect(graph.outputs['labels']!.element!.keyType, TensorType.string);
+    expect((result['scores'] as OnnxMap).entries.keys, [max, BigInt.one]);
+    expect(
+        ((result['labels'] as OnnxSequence).elements.single as OnnxMap)
+            .entries['cat'],
+        label.entries['cat']);
+    for (final invalid in [
+      OnnxMap(TensorType.string, {}),
+      OnnxMap(TensorType.uint64, {
+        1: Tensor.int64([2], [1, 2])
+      }),
+      OnnxMap(TensorType.uint64, {
+        1: Tensor.float32([1], [1])
+      }),
+    ]) {
+      expect(() => graph.runValues({'scores': invalid, 'labels': labels}),
+          throwsArgumentError);
+    }
+    expect(() => OnnxMap(TensorType.uint64, {max + BigInt.one: pair}),
+        throwsArgumentError);
+    expect(() => OnnxMap(TensorType.int8, {-129: pair}), throwsArgumentError);
+    expect(() => OnnxMap(TensorType.string, {1: pair}), throwsArgumentError);
+    expect(() => OnnxMap(TensorType.int8, {1: pair, BigInt.one: pair}),
+        throwsArgumentError);
+  });
   test('integer Gemm combines both fractions before truncating', () {
     final large = (BigInt.one << 58) + BigInt.one;
     final y = open('integer_gemm').run({

@@ -8,8 +8,11 @@ class TensorInfo {
   final List<Object?>? dimensions;
   final String kind;
   final TensorInfo? element;
+
+  /// Declared key type of a map. Its value type is available in [element].
+  final TensorType? keyType;
   TensorInfo._(this.name, this.type, this.dimensions,
-      [this.kind = "tensor", this.element]);
+      [this.kind = "tensor", this.element, this.keyType]);
 
   factory TensorInfo._read(_Proto value) {
     return TensorInfo._type(value.string(1), value.message(2));
@@ -21,6 +24,14 @@ class TensorInfo {
           TensorInfo._type(name, tensor.message(sequence ? 4 : 9).message(1));
       return TensorInfo._(
           name, inner.type, null, sequence ? 'sequence' : 'optional', inner);
+    }
+    if (tensor.has(5)) {
+      final map = tensor.message(5);
+      final keyType = _type(map.integer(1));
+      if (!_mapKeyTypes.contains(keyType))
+        throw FormatException('Invalid map key type $keyType');
+      final element = TensorInfo._type(name, map.message(2));
+      return TensorInfo._(name, element.type, null, 'map', element, keyType);
     }
     if (!tensor.has(1)) throw UnsupportedError('Expected dense tensor type');
     final t = tensor.message(1);
@@ -41,6 +52,15 @@ class TensorInfo {
       final present = value is OnnxOptional ? value.value : value;
       if (present != null)
         element!._check(present, symbols, checkDimensions: checkDimensions);
+      return;
+    }
+    if (kind == 'map') {
+      if (value is! OnnxMap || value.keyType != keyType) {
+        throw ArgumentError('$name expects a map with $keyType keys');
+      }
+      for (final item in value.entries.values) {
+        element!._check(item, symbols, checkDimensions: checkDimensions);
+      }
       return;
     }
     if (kind == 'sequence') {

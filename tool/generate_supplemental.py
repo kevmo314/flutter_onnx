@@ -21,6 +21,21 @@ def info(name, shape, dtype=T.FLOAT):
     return h.make_tensor_value_info(name, dtype, shape)
 
 
+# Graph inputs can be returned directly, including composite ONNX map types.
+map_values = [
+    h.make_value_info(
+        "scores", h.make_map_type_proto(T.UINT64, h.make_tensor_type_proto(T.FLOAT, [2]))
+    ),
+    h.make_value_info(
+        "labels",
+        h.make_sequence_type_proto(
+            h.make_map_type_proto(T.STRING, h.make_tensor_type_proto(T.INT64, []))
+        ),
+    ),
+]
+save("map_interfaces", [], map_values, map_values)
+
+
 node = h.make_node
 save(
     "containers",

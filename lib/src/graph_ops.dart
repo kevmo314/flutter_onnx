@@ -8,6 +8,61 @@ class OnnxSequence implements OnnxValue {
       : elements = List.unmodifiable(values);
 }
 
+const _mapKeyTypes = {
+  TensorType.string,
+  TensorType.int8,
+  TensorType.int16,
+  TensorType.int32,
+  TensorType.int64,
+  TensorType.uint8,
+  TensorType.uint16,
+  TensorType.uint32,
+  TensorType.uint64,
+};
+
+/// An ONNX map. Integer keys are stored as [BigInt] so INT64 and UINT64 keys
+/// retain their full precision on the web. The constructor also accepts [int].
+class OnnxMap implements OnnxValue {
+  final TensorType keyType;
+  final Map<Object, OnnxValue> entries;
+
+  factory OnnxMap(TensorType keyType, Map<Object, OnnxValue> entries) {
+    if (!_mapKeyTypes.contains(keyType)) {
+      throw ArgumentError.value(
+          keyType, 'keyType', 'Expected an ONNX map key type');
+    }
+    final result = <Object, OnnxValue>{};
+    for (final entry in entries.entries) {
+      final key = entry.key;
+      Object normalized;
+      if (keyType == TensorType.string && key is String) {
+        normalized = key;
+      } else if (keyType != TensorType.string &&
+          (key is int || key is BigInt)) {
+        final number = key is BigInt ? key : BigInt.from(key as int);
+        final signed = keyType == TensorType.int8 ||
+            keyType == TensorType.int16 ||
+            keyType == TensorType.int32 ||
+            keyType == TensorType.int64;
+        final narrowed = signed
+            ? number.toSigned(keyType.bitWidth)
+            : number.toUnsigned(keyType.bitWidth);
+        if (number != narrowed)
+          throw ArgumentError.value(
+              key, 'key', 'Outside the range of $keyType');
+        normalized = number;
+      } else {
+        throw ArgumentError.value(key, 'key', 'Expected a $keyType map key');
+      }
+      if (result.containsKey(normalized))
+        throw ArgumentError('Duplicate map key $normalized');
+      result[normalized] = entry.value;
+    }
+    return OnnxMap._(keyType, Map.unmodifiable(result));
+  }
+  OnnxMap._(this.keyType, this.entries);
+}
+
 class OnnxOptional implements OnnxValue {
   final OnnxValue? value;
   const OnnxOptional(this.value);
