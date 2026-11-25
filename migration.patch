@@ -247,10 +247,10 @@ index 0000000..b740d9f
 +PY
 diff --git a/.github/scripts/test-supertonic-device.sh b/.github/scripts/test-supertonic-device.sh
 new file mode 100644
-index 0000000..7d430ff
+index 0000000..a7e1a39
 --- /dev/null
 +++ b/.github/scripts/test-supertonic-device.sh
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,57 @@
 +#!/usr/bin/env bash
 +set -euo pipefail
 +model="$MODEL_DIR"
@@ -300,14 +300,16 @@ index 0000000..7d430ff
 +    echo "::error::The simulator app did not report its integration test results"
 +    exit 1
 +  fi
++  cp "$dir/$report" "$RUNNER_TEMP/ios-speech-tests.json"
 +  cat "$dir/$report"
 +  jq -e '.passed and (.failures | length == 0) and (.tests | length >= 9)
++         and (.waveform_max_abs_errors | has("en_chat") and has("en_short") and has("es") and has("ru") and has("ko"))
 +         and (.tests | index("matches the reference implementation") != null)
 +         and (.tests | index("streams a single chat message before its final PCM is ready") != null)' "$dir/$report"
 +fi
 +bash .github/scripts/profile-supertonic-device.sh "$1" "$device"
 diff --git a/.github/workflows/on-device-tts-ios.yml b/.github/workflows/on-device-tts-ios.yml
-index 2a93a30..2d65842 100644
+index 2a93a30..bd97001 100644
 --- a/.github/workflows/on-device-tts-ios.yml
 +++ b/.github/workflows/on-device-tts-ios.yml
 @@ -1,7 +1,7 @@
@@ -411,7 +413,7 @@ index 2a93a30..2d65842 100644
            if grep -E "Test Case .* skipped" "$RUNNER_TEMP/xctest.log"; then
              echo "::error::tests were skipped"
              exit 1
-@@ -116,24 +99,90 @@ jobs:
+@@ -116,24 +99,92 @@ jobs:
              echo '```'
            } >> "$GITHUB_STEP_SUMMARY"
  
@@ -516,10 +518,12 @@ index 2a93a30..2d65842 100644
 +        if: always()
 +        with:
 +          name: playback-profile-${{ runner.os }}
-+          path: ${{ runner.temp }}/playback-*.jsonl
++          path: |
++            ${{ runner.temp }}/playback-*.jsonl
++            ${{ runner.temp }}/ios-speech-tests.json
 +          if-no-files-found: ignore
 diff --git a/integration_test/on_device_tts_test.dart b/integration_test/on_device_tts_test.dart
-index a92a152..e3dc733 100644
+index a92a152..8693140 100644
 --- a/integration_test/on_device_tts_test.dart
 +++ b/integration_test/on_device_tts_test.dart
 @@ -1,4 +1,4 @@
@@ -544,13 +548,14 @@ index a92a152..e3dc733 100644
  
  /// Max abs diff allowed against the reference audio. The fp32 model stays
  /// within 1e-3 across ONNX Runtime builds; int8 kernels differ between builds
-@@ -42,8 +45,31 @@ double rms(Float32List pcm) {
+@@ -42,8 +45,33 @@ double rms(Float32List pcm) {
  }
  
  void main() {
 -  IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 +  final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 +  const reportName = String.fromEnvironment('ON_DEVICE_TTS_REPORT');
++  final waveformErrors = <String, double>{};
 +  if (reportName.isNotEmpty) {
 +    unawaited(
 +      binding.allTestsPassed.future.then((passed) async {
@@ -561,6 +566,7 @@ index a92a152..e3dc733 100644
 +          jsonEncode({
 +            'passed': passed,
 +            'tests': binding.results.keys.toList(),
++            'waveform_max_abs_errors': waveformErrors,
 +            'failures': {
 +              for (final failure in binding.failureMethodsDetails)
 +                failure.methodName: failure.details,
@@ -577,7 +583,7 @@ index a92a152..e3dc733 100644
    if (modelDir.isEmpty) {
      testWidgets(
        'on-device TTS (needs ON_DEVICE_TTS_MODEL_DIR)',
-@@ -56,16 +82,20 @@ void main() {
+@@ -56,16 +84,20 @@ void main() {
    late OnnxTts tts;
  
    setUpAll(() async {
@@ -600,7 +606,7 @@ index a92a152..e3dc733 100644
    testWidgets('load fails on a missing model', (_) async {
      await expectLater(
        OnnxTts.load(modelDir: '/data/nonexistent'),
-@@ -168,10 +198,15 @@ void main() {
+@@ -168,10 +200,15 @@ void main() {
  
    testWidgets('matches the reference implementation', (_) async {
      final manifestFile = File('$referenceDir/manifest.json');
@@ -617,7 +623,15 @@ index a92a152..e3dc733 100644
      final manifest =
          jsonDecode(manifestFile.readAsStringSync()) as Map<String, dynamic>;
      for (final c in manifest['cases'] as List) {
-@@ -202,7 +237,9 @@ void main() {
+@@ -192,6 +229,7 @@ void main() {
+       for (var i = 0; i < reference.length; i++) {
+         maxDiff = max(maxDiff, (reference[i] - audio.pcm[i]).abs());
+       }
++      waveformErrors[c['name'] as String] = maxDiff;
+       // ignore: avoid_print
+       print('parity ${c['name']}: max abs diff $maxDiff');
+       expect(
+@@ -202,7 +240,9 @@ void main() {
      }
    });
  
@@ -628,7 +642,7 @@ index a92a152..e3dc733 100644
      const segments = [
        'Daisy said,',
        'that was the cleanest clutch I have seen all week,',
-@@ -219,8 +256,8 @@ void main() {
+@@ -219,8 +259,8 @@ void main() {
      final events = <OnnxTtsEvent>[];
      final sub = tts.events.listen(events.add);
      final stopwatch = Stopwatch()..start();
@@ -639,7 +653,7 @@ index a92a152..e3dc733 100644
        language: 'en',
        voiceId: 'M2',
        utteranceId: 'three',
-@@ -236,7 +273,9 @@ void main() {
+@@ -236,7 +276,9 @@ void main() {
      expect(events.every((e) => e.utteranceId == 'three'), isTrue);
      final firstAudio = events[0].elapsed;
      final done = events[1].elapsed;
