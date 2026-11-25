@@ -20,7 +20,7 @@ jobs:
           ref: 44fc55c6c246488500517b0527f149e88c02b24f
       - name: Apply the pinned RTChat migration
         run: |
-          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/7e26527fcaf93fe2eda730533f00e97f6480f67d/migration.patch -o "$RUNNER_TEMP/migration.patch"
+          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/bbd585904790fc61d1ee3ef1f17b4f928100cc87/migration.patch -o "$RUNNER_TEMP/migration.patch"
           git apply "$RUNNER_TEMP/migration.patch"
 
       - uses: actions/cache@v6
@@ -92,7 +92,7 @@ jobs:
           ref: 44fc55c6c246488500517b0527f149e88c02b24f
       - name: Apply the pinned RTChat migration
         run: |
-          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/7e26527fcaf93fe2eda730533f00e97f6480f67d/migration.patch -o "$RUNNER_TEMP/migration.patch"
+          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/bbd585904790fc61d1ee3ef1f17b4f928100cc87/migration.patch -o "$RUNNER_TEMP/migration.patch"
           git apply "$RUNNER_TEMP/migration.patch"
       - uses: subosito/flutter-action@v2
         with:
