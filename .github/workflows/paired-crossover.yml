@@ -1,0 +1,58 @@
+name: Compare fused speech projections on the same Apple CPU
+on:
+  push:
+    paths: ['.github/workflows/paired-crossover.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-cpu:
+    strategy:
+      matrix:
+        os: [macos-15]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: cpu
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 8a69bef57c66cb64f090cc515a81bb1c78809403
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: dart pub get
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compare native CPU speech inference with Supertone
+        env:
+          HF_HUB_DISABLE_XET: '1'
+          RTCHAT_REFERENCE_REV: 6bac5c59d7b593030a7c98ff9b37ae712fdb35ed
+        run: |
+          python -m pip install supertonic==1.3.1
+          curl --retry 3 -fsSL "https://raw.githubusercontent.com/muxable/rtchat/$RTCHAT_REFERENCE_REV/packages/on_device_tts/tool/supertonic_reference.py" -o "$RUNNER_TEMP/reference.py"
+          python - <<'PYTHON'
+          from pathlib import Path
+          p = Path('test/supertonic_reference.dart')
+          source = p.read_text().replace('const cpu = NativeCpuBackend();', 'final cpu = _ProfileBackend();')
+          source += """
+          class _ProfileBackend extends NativeCpuBackend {
+            final enabled = Platform.environment['PAIRED'] == 'on';
+            @override
+            bool get supportsPointwisePairs => enabled && super.supportsPointwisePairs;
+          }
+          """
+          p.write_text(source)
+          PYTHON
+          dart build cli -t test/supertonic_reference.dart -o "$RUNNER_TEMP/speech-cli"
+          model=$(python -c 'from huggingface_hub import snapshot_download; print(snapshot_download("Supertone/supertonic-3",revision="3cadd1ee6394adea1bd021217a0e650ede09a323",allow_patterns=["onnx/*","voice_styles/*"]))')
+          python -I test/playback_reference.py "$RUNNER_TEMP/reference.py" "$model" "$RUNNER_TEMP/playback"
+          for variant in 1-off 2-on 3-on 4-off; do
+            PAIRED=${variant#*-} "$RUNNER_TEMP/speech-cli/bundle/bin/supertonic_reference" --playback "$RUNNER_TEMP/playback" > "$RUNNER_TEMP/crossover-$variant.log"
+            cat "$RUNNER_TEMP/crossover-$variant.log"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: speech-projection-crossover
+          path: ${{ runner.temp }}/crossover-*.log
