@@ -2962,7 +2962,7 @@ index 65eb34d..14d25f8 100644
  // alternative. Models requiring phonemes need a separate engine integration.
  //
 diff --git a/packages/on_device_tts/pubspec.yaml b/packages/on_device_tts/pubspec.yaml
-index f6b7f11..6e40d92 100644
+index f6b7f11..f8afd2f 100644
 --- a/packages/on_device_tts/pubspec.yaml
 +++ b/packages/on_device_tts/pubspec.yaml
 @@ -1,15 +1,24 @@
@@ -2983,12 +2983,12 @@ index f6b7f11..6e40d92 100644
 +  flutter_onnx:
 +    git:
 +      url: https://github.com/kevmo314/flutter_onnx.git
-+      ref: 67c2a2b812e45f58e55075ee4a04898359d55505
++      ref: 7abf879c04277c75dce3b55a303f8cd2756669b1
 +  flutter_onnx_cpu:
 +    git:
 +      url: https://github.com/kevmo314/flutter_onnx.git
 +      path: cpu
-+      ref: 67c2a2b812e45f58e55075ee4a04898359d55505
++      ref: 7abf879c04277c75dce3b55a303f8cd2756669b1
    background_downloader: ^9.6.4
    crypto: ^3.0.7
    flutter:
@@ -3348,7 +3348,7 @@ index cd1d14e..cd707b7 100644
      handler = (call) async => call.method == 'load' ? 'supertonic-3' : null;
      final tts = await OnnxTts.load(modelDir: '/m', platform: platform);
 diff --git a/pubspec.lock b/pubspec.lock
-index 8ecf368..dd4f044 100644
+index 8ecf368..98b4bae 100644
 --- a/pubspec.lock
 +++ b/pubspec.lock
 @@ -9,6 +9,14 @@ packages:
@@ -3387,8 +3387,8 @@ index 8ecf368..dd4f044 100644
 +    dependency: transitive
 +    description:
 +      path: "."
-+      ref: "67c2a2b812e45f58e55075ee4a04898359d55505"
-+      resolved-ref: "67c2a2b812e45f58e55075ee4a04898359d55505"
++      ref: "7abf879c04277c75dce3b55a303f8cd2756669b1"
++      resolved-ref: "7abf879c04277c75dce3b55a303f8cd2756669b1"
 +      url: "https://github.com/kevmo314/flutter_onnx.git"
 +    source: git
 +    version: "0.1.0"
@@ -3396,8 +3396,8 @@ index 8ecf368..dd4f044 100644
 +    dependency: transitive
 +    description:
 +      path: cpu
-+      ref: "67c2a2b812e45f58e55075ee4a04898359d55505"
-+      resolved-ref: "67c2a2b812e45f58e55075ee4a04898359d55505"
++      ref: "7abf879c04277c75dce3b55a303f8cd2756669b1"
++      resolved-ref: "7abf879c04277c75dce3b55a303f8cd2756669b1"
 +      url: "https://github.com/kevmo314/flutter_onnx.git"
 +    source: git
 +    version: "0.1.0"
