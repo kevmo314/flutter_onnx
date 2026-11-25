@@ -91,24 +91,17 @@ jobs:
           path: ${{ runner.temp }}/playback-android.jsonl
 
   ios-playback:
-    needs: synthesis
-    if: ${{ !cancelled() }}
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 75
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
-      - uses: actions/download-artifact@v4
-        with:
-          name: ios-playback-app
-          path: ${{ runner.temp }}
-      - name: Profile iOS synthesis and playback on a fresh simulator host
-        working-directory: ${{ runner.temp }}
+      - name: Boot the measurement simulator while the app builds
         run: |
-          tar -xf ios-playback.tar
-          export MODEL_DIR="$RUNNER_TEMP/supertonic-3"
-          bash download-supertonic.sh 3 "$MODEL_DIR"
           device=$(xcrun simctl list devices available -j | python3 -c '
           import json, sys
           devices = json.load(sys.stdin)["devices"]
@@ -119,7 +112,33 @@ jobs:
           print(iphone["udid"])')
           xcrun simctl boot "$device"
           xcrun simctl bootstatus "$device" -b
-          bash profile-supertonic-device.sh ios "$device" "$RUNNER_TEMP/Runner.app"
+          echo "SIMULATOR=$device" >> "$GITHUB_ENV"
+      - name: Wait for the iOS app from this workflow run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          while true; do
+            available=$(gh api "$run/artifacts?name=ios-playback-app" --jq '.artifacts | any(.expired == false)')
+            if [[ "$available" == true ]]; then break; fi
+            status=$(gh api "$run/jobs" --jq '.jobs[] | select(.name == "synthesis (macos-26)") | .conclusion // "pending"')
+            if [[ -n "$status" && "$status" != pending && "$status" != success ]]; then
+              echo "::error::The iOS build finished with $status"
+              exit 1
+            fi
+            sleep 15
+          done
+      - uses: actions/download-artifact@v4
+        with:
+          name: ios-playback-app
+          path: ${{ runner.temp }}
+      - name: Profile iOS synthesis and playback on the warmed simulator
+        working-directory: ${{ runner.temp }}
+        run: |
+          tar -xf ios-playback.tar
+          export MODEL_DIR="$RUNNER_TEMP/supertonic-3"
+          bash download-supertonic.sh 3 "$MODEL_DIR"
+          bash profile-supertonic-device.sh ios "$SIMULATOR" "$RUNNER_TEMP/Runner.app"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
