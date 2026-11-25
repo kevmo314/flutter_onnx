@@ -38,7 +38,7 @@ jobs:
       - name: Prepare the migrated app with the runtime under test
         working-directory: rtchat
         run: |
-          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/7e26527fcaf93fe2eda730533f00e97f6480f67d/migration.patch -o "$RUNNER_TEMP/rtchat.patch"
+          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/bbd585904790fc61d1ee3ef1f17b4f928100cc87/migration.patch -o "$RUNNER_TEMP/rtchat.patch"
           git apply "$RUNNER_TEMP/rtchat.patch"
           cat > pubspec_overrides.yaml <<'EOF'
           dependency_overrides:
