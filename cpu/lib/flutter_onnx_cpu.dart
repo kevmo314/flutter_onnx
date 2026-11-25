@@ -203,6 +203,31 @@ external int _runDenseFilter(
   int gelu,
 );
 
+@Native<
+  Int32 Function(
+    Pointer<Void>,
+    Pointer<Void>,
+    Pointer<Float>,
+    Pointer<Float>,
+    Int32,
+    Int32,
+    Int32,
+    Int32,
+    Int32,
+  )
+>(symbol: 'onnx_fc_pair')
+external int _runDensePair(
+  Pointer<Void> first,
+  Pointer<Void> second,
+  Pointer<Float> input,
+  Pointer<Float> output,
+  int batch,
+  int channels,
+  int width,
+  int hidden,
+  int filters,
+);
+
 class _DenseFilter implements Finalizable {
   static final _free = NativeFinalizer(
     Native.addressOf<NativeFunction<Void Function(Pointer<Void>)>>(
@@ -279,7 +304,7 @@ class _PackedFilters implements Finalizable {
 }
 
 /// Dense CPU products for inference isolates. Apple devices use Accelerate.
-class NativeCpuBackend implements ChannelwiseBackend {
+class NativeCpuBackend implements PointwisePairBackend {
   /// Upper bound on explicit native workers for large products. Apple can
   /// process activation and bias in two independent output ranges.
   /// Accelerate manages any threads internal to its matrix operations.
@@ -360,6 +385,83 @@ class NativeCpuBackend implements ChannelwiseBackend {
   static final _denseFilters = Expando<Expando<_DenseFilter>>();
   static final _caches = Expando<Expando<_PackedFilters>>();
 
+  _DenseFilter _dense(Tensor weights, Tensor? bias, int threads) {
+    final cache = _denseFilters[this] ??= Expando<_DenseFilter>();
+    final existing = cache[weights];
+    if (existing != null && identical(existing.bias, bias)) return existing;
+    return cache[weights] = _DenseFilter.create(weights, bias, threads);
+  }
+
+  @override
+  bool get supportsPointwisePairs => Platform.isMacOS || Platform.isIOS;
+
+  @override
+  Future<Float32List?> pointwisePair(
+    Tensor input,
+    Tensor firstWeights,
+    Tensor? firstBias,
+    Tensor secondWeights,
+    Tensor? secondBias,
+  ) async {
+    if (!supportsPointwisePairs ||
+        input.type != TensorType.float32 ||
+        input.shape.length != 3)
+      return null;
+    bool valid(Tensor w, Tensor? b, int channels) =>
+        w.type == input.type &&
+        w.shape.length == 3 &&
+        w.shape[2] == 1 &&
+        w.shape[1] == channels &&
+        w.shape[0] >= 128 &&
+        w.shape[0] % 16 == 0 &&
+        w.length <= 16 * 1024 * 1024 &&
+        (b == null ||
+            (b.type == input.type &&
+                b.shape.length == 1 &&
+                b.length == w.shape[0]));
+    final [batch, channels, width] = input.shape;
+    if (batch == 0 ||
+        width == 0 ||
+        channels < 128 ||
+        !valid(firstWeights, firstBias, channels))
+      return null;
+    final hidden = firstWeights.shape[0];
+    if (hidden <= channels || !valid(secondWeights, secondBias, hidden))
+      return null;
+    final filters = secondWeights.shape[0];
+    final frames = batch * width;
+    if (filters > hidden ||
+        frames * hidden > 16 * 1024 * 1024 ||
+        frames * firstWeights.length < 250000 ||
+        frames * secondWeights.length < 250000)
+      return null;
+    final threads = math.max(
+      1,
+      math.min(maxThreads, Platform.numberOfProcessors),
+    );
+    final first = _dense(firstWeights, firstBias, threads);
+    final second = _dense(secondWeights, secondBias, threads);
+    if (first.handle == nullptr || second.handle == nullptr) return null;
+    return using((arena) {
+      final x = arena<Float>(input.length), y = arena<Float>(frames * filters);
+      x.asTypedList(input.length).setAll(0, input.values as Float32List);
+      if (_runDensePair(
+            first.handle,
+            second.handle,
+            x,
+            y,
+            batch,
+            channels,
+            width,
+            hidden,
+            filters,
+          ) ==
+          0)
+        return null;
+      return Float32List.fromList(y.asTypedList(frames * filters));
+    }, malloc);
+  }
+
   @override
   Future<Float32List?> pointwise(
     Tensor input,
@@ -406,11 +508,7 @@ class NativeCpuBackend implements ChannelwiseBackend {
     if ((Platform.isIOS || Platform.isMacOS) &&
         filters >= 128 &&
         channels >= 128) {
-      final cache = _denseFilters[this] ??= Expando<_DenseFilter>();
-      dense = cache[weights];
-      if (dense == null || !identical(dense.bias, bias)) {
-        dense = cache[weights] = _DenseFilter.create(weights, bias, threads);
-      }
+      dense = _dense(weights, bias, threads);
     }
     return using((arena) {
       final size = batch * filters * width;
