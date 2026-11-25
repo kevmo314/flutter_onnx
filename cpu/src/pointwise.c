@@ -87,7 +87,7 @@ static float expanded_gelu(float value) {
 #ifdef __APPLE__
 typedef struct {
   BNNSFilter product;
-  float *contraction_weights;
+  float *weights;
   int has_bias;
   float bias[];
 } dense_filter;
@@ -114,17 +114,19 @@ EXPORT void *onnx_fc_create(const float *weights, const float *bias,
         calloc(1, sizeof(*prepared) + (size_t)filters * sizeof(float));
     if (!prepared)
       return NULL;
-    if (channels >= filters) {
-      size_t bytes = (size_t)channels * filters * sizeof(float);
-      prepared->contraction_weights = malloc(bytes);
-      if (prepared->contraction_weights)
-        memcpy(prepared->contraction_weights, weights, bytes);
-    } else {
-      prepared->product = BNNSFilterCreateLayerFullyConnected(&layer, &params);
-    }
-    if (!prepared->product && !prepared->contraction_weights) {
+    const size_t bytes = (size_t)channels * filters * sizeof(float);
+    prepared->weights = malloc(bytes);
+    if (!prepared->weights) {
       free(prepared);
       return NULL;
+    }
+    memcpy(prepared->weights, weights, bytes);
+    if (channels < filters) {
+      // Small expansions use BNNS. Both kernels can borrow the same weights
+      // for the entire lifetime of the prepared projection.
+      layer.w_desc.data = prepared->weights;
+      params.flags = BNNSFlagsUseClientPtr;
+      prepared->product = BNNSFilterCreateLayerFullyConnected(&layer, &params);
     }
     prepared->has_bias = bias != NULL;
     if (bias)
@@ -138,7 +140,7 @@ EXPORT void onnx_fc_destroy(void *handle) {
   dense_filter *filter = handle;
   if (filter->product)
     BNNSFilterDestroy(filter->product);
-  free(filter->contraction_weights);
+  free(filter->weights);
   free(filter);
 }
 
@@ -150,8 +152,10 @@ EXPORT int onnx_fc_run(void *filter, const float *x, float *y, int batch,
   if (repeated)
     batch = 1;
   const size_t rows = (size_t)batch * width;
-  const size_t padded =
-      prepared->contraction_weights ? (rows + 15) & ~(size_t)15 : rows;
+  // Once there are enough frames, BLAS also amortizes its setup for
+  // expansions. Short expansions retain the prepared fully connected kernel.
+  const int use_blas = !prepared->product || rows >= 64;
+  const size_t padded = use_blas ? (rows + 15) & ~(size_t)15 : rows;
   float *samples = malloc(padded * channels * sizeof(float));
   float *products = malloc(padded * filters * sizeof(float));
   if (!samples || !products) {
@@ -162,13 +166,13 @@ EXPORT int onnx_fc_run(void *filter, const float *x, float *y, int batch,
   for (int b = 0; b < batch; ++b)
     vDSP_mtrans(x + b * nx, 1, samples + b * nx, 1, width, channels);
   int success = 1;
-  if (prepared->contraction_weights) {
+  if (use_blas) {
     // Time frames are contiguous rows. Pad the short row dimension so BLAS
     // can use full tiles even when the utterance has an odd frame count.
     memset(samples + rows * channels, 0,
            (padded - rows) * channels * sizeof(float));
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, (int)padded, filters,
-                channels, 1, samples, channels, prepared->contraction_weights,
+                channels, 1, samples, channels, prepared->weights,
                 channels, 0, products, filters);
   } else {
     success = BNNSFilterApplyBatch(prepared->product, rows, samples,
