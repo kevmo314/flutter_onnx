@@ -103,8 +103,8 @@ void main() {
   test(
     'prepared convolution spans batches, tails and changed biases',
     () async {
-      const filters = 128, width = 13, batch = 2;
-      for (final channels in [96, 256]) {
+      const width = 13, batch = 2;
+      for (final (channels, filters) in [(96, 128), (256, 128), (128, 1024)]) {
         final w = Tensor.float32([
           filters,
           channels,
