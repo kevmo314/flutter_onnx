@@ -38,7 +38,7 @@ jobs:
           python-version: '3.12'
       - name: Prepare the pinned app and independent reference
         run: |
-          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/a345f724eea243ee8adb4513ee360f7dce59495c/migration.patch -o "$RUNNER_TEMP/migration.patch"
+          curl --retry 3 -fsSL https://raw.githubusercontent.com/kevmo314/flutter_onnx/2d39cc8b72792b0a883e7b481e933be3f7798480/migration.patch -o "$RUNNER_TEMP/migration.patch"
           git apply "$RUNNER_TEMP/migration.patch"
           flutter pub get
           flutter analyze --no-pub integration_test/profile_playback.dart integration_test/on_device_tts_test.dart
