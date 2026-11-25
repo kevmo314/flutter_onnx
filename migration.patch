@@ -247,15 +247,15 @@ index 0000000..b740d9f
 +PY
 diff --git a/.github/scripts/test-supertonic-device.sh b/.github/scripts/test-supertonic-device.sh
 new file mode 100644
-index 0000000..d2ae998
+index 0000000..7d430ff
 --- /dev/null
 +++ b/.github/scripts/test-supertonic-device.sh
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,55 @@
 +#!/usr/bin/env bash
 +set -euo pipefail
 +model="$MODEL_DIR"
 +reference="$RUNNER_TEMP/reference"
-+token=
++target=integration_test/on_device_tts_test.dart
 +if [[ "$1" == android ]]; then
 +  device=$(adb get-serialno)
 +  flutter build apk --debug
@@ -268,6 +268,9 @@ index 0000000..d2ae998
 +  done
 +  model=/data/user/0/com.rtirl.chat/files/model
 +  reference=/data/user/0/com.rtirl.chat/files/reference
++  flutter test "$target" -d "$device" --reporter expanded \
++    --dart-define=ON_DEVICE_TTS_MODEL_DIR="$model" \
++    --dart-define=ON_DEVICE_TTS_REFERENCE_DIR="$reference"
 +else
 +  device=$(xcrun simctl list devices available -j | python3 -c '
 +import json, sys
@@ -275,39 +278,34 @@ index 0000000..d2ae998
 +print(next(d["udid"] for r in sorted(devices, reverse=True) if "iOS" in r for d in devices[r] if d["name"].startswith("iPhone")))')
 +  xcrun simctl boot "$device" || xcrun simctl bootstatus "$device" -b
 +  xcrun simctl bootstatus "$device" -b
-+  token=$(uuidgen)
-+  stage_ios_fixtures() {
-+    local dir marker
-+    while true; do
-+      dir=$(xcrun simctl get_app_container "$device" com.rtirl.chat data 2>/dev/null || true)
-+      marker="$dir/Documents/tts-fixtures-$token"
-+      if [[ -n "$dir" && -f "$marker.request" ]]; then
-+        mkdir -p "$dir/Documents/model" "$dir/Documents/reference"
-+        cp -R "$MODEL_DIR/." "$dir/Documents/model/"
-+        cp -R "$RUNNER_TEMP/reference/." "$dir/Documents/reference/"
-+        touch "$marker.ready"
-+        return
-+      fi
-+      sleep 2
-+    done
-+  }
-+  stage_ios_fixtures &
-+  staging=$!
-+  trap 'kill "$staging" 2>/dev/null || true' EXIT
-+  model=model
-+  reference=reference
-+fi
-+status=0
-+flutter test integration_test/on_device_tts_test.dart -d "$device" --reporter expanded \
-+  --dart-define=ON_DEVICE_TTS_MODEL_DIR="$model" \
-+  --dart-define=ON_DEVICE_TTS_REFERENCE_DIR="$reference" --dart-define=ON_DEVICE_TTS_FIXTURE_TOKEN="$token" || status=$?
-+if [[ -n "${staging:-}" ]]; then
-+  kill "$staging" 2>/dev/null || true
-+  wait "$staging" 2>/dev/null || true
-+  trap - EXIT
++  # Stage the fixtures in the installed app, then run the Flutter integration
++  # suite without a VM-service connection to the host.
++  report="tts-tests-$(uuidgen).json"
++  flutter build ios --simulator --debug -t "$target" \
++    --dart-define=ON_DEVICE_TTS_MODEL_DIR=model \
++    --dart-define=ON_DEVICE_TTS_REFERENCE_DIR=reference \
++    --dart-define=ON_DEVICE_TTS_REPORT="$report"
++  app=com.rtirl.chat
++  xcrun simctl install "$device" build/ios/iphonesimulator/Runner.app
++  dir="$(xcrun simctl get_app_container "$device" "$app" data)/Documents"
++  mkdir -p "$dir/model" "$dir/reference"
++  cp -R "$model/." "$dir/model/"
++  cp -R "$reference/." "$dir/reference/"
++  xcrun simctl launch --terminate-running-process "$device" "$app"
++  for ((attempt=0; attempt<180; ++attempt)); do
++    if [[ -f "$dir/$report" ]]; then break; fi
++    sleep 5
++  done
++  if [[ ! -f "$dir/$report" ]]; then
++    echo "::error::The simulator app did not report its integration test results"
++    exit 1
++  fi
++  cat "$dir/$report"
++  jq -e '.passed and (.failures | length == 0) and (.tests | length >= 9)
++         and (.tests | index("matches the reference implementation") != null)
++         and (.tests | index("streams a single chat message before its final PCM is ready") != null)' "$dir/$report"
 +fi
 +bash .github/scripts/profile-supertonic-device.sh "$1" "$device"
-+exit "$status"
 diff --git a/.github/workflows/on-device-tts-ios.yml b/.github/workflows/on-device-tts-ios.yml
 index 2a93a30..2d65842 100644
 --- a/.github/workflows/on-device-tts-ios.yml
@@ -521,7 +519,7 @@ index 2a93a30..2d65842 100644
 +          path: ${{ runner.temp }}/playback-*.jsonl
 +          if-no-files-found: ignore
 diff --git a/integration_test/on_device_tts_test.dart b/integration_test/on_device_tts_test.dart
-index a92a152..e1fe841 100644
+index a92a152..e3dc733 100644
 --- a/integration_test/on_device_tts_test.dart
 +++ b/integration_test/on_device_tts_test.dart
 @@ -1,4 +1,4 @@
@@ -546,36 +544,45 @@ index a92a152..e1fe841 100644
  
  /// Max abs diff allowed against the reference audio. The fp32 model stays
  /// within 1e-3 across ONNX Runtime builds; int8 kernels differ between builds
-@@ -44,6 +47,8 @@ double rms(Float32List pcm) {
+@@ -42,8 +45,31 @@ double rms(Float32List pcm) {
+ }
+ 
  void main() {
-   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+-  IntegrationTestWidgetsFlutterBinding.ensureInitialized();
++  final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
++  const reportName = String.fromEnvironment('ON_DEVICE_TTS_REPORT');
++  if (reportName.isNotEmpty) {
++    unawaited(
++      binding.allTestsPassed.future.then((passed) async {
++        final documents = await getApplicationDocumentsDirectory();
++        final result = File('${documents.path}/$reportName');
++        final temporary = File('${result.path}.tmp');
++        await temporary.writeAsString(
++          jsonEncode({
++            'passed': passed,
++            'tests': binding.results.keys.toList(),
++            'failures': {
++              for (final failure in binding.failureMethodsDetails)
++                failure.methodName: failure.details,
++            },
++          }),
++        );
++        await temporary.rename(result.path);
++      }),
++    );
++  }
  
 +  var modelDir = configuredModelDir;
 +  var referenceDir = configuredReferenceDir;
    if (modelDir.isEmpty) {
      testWidgets(
        'on-device TTS (needs ON_DEVICE_TTS_MODEL_DIR)',
-@@ -56,16 +61,35 @@ void main() {
+@@ -56,16 +82,20 @@ void main() {
    late OnnxTts tts;
  
    setUpAll(() async {
-+    // flutter test can replace the simulator app and its data container.
-+    // Request fixtures from the running test so CI stages them in this install.
-+    const token = String.fromEnvironment('ON_DEVICE_TTS_FIXTURE_TOKEN');
-+    if (token.isNotEmpty) {
++    if (reportName.isNotEmpty) {
 +      final documents = await getApplicationDocumentsDirectory();
-+      final marker = '${documents.path}/tts-fixtures-$token';
-+      await File('$marker.request').writeAsString('');
-+      final ready = File('$marker.ready');
-+      final deadline = Stopwatch()..start();
-+      while (!await ready.exists()) {
-+        if (deadline.elapsed > const Duration(minutes: 3)) {
-+          throw StateError(
-+            'Timed out waiting for the speech model and reference PCM',
-+          );
-+        }
-+        await Future<void>.delayed(const Duration(milliseconds: 250));
-+      }
 +      modelDir = '${documents.path}/$modelDir';
 +      referenceDir = '${documents.path}/$referenceDir';
 +    }
@@ -593,7 +600,7 @@ index a92a152..e1fe841 100644
    testWidgets('load fails on a missing model', (_) async {
      await expectLater(
        OnnxTts.load(modelDir: '/data/nonexistent'),
-@@ -168,10 +192,15 @@ void main() {
+@@ -168,10 +198,15 @@ void main() {
  
    testWidgets('matches the reference implementation', (_) async {
      final manifestFile = File('$referenceDir/manifest.json');
@@ -610,7 +617,7 @@ index a92a152..e1fe841 100644
      final manifest =
          jsonDecode(manifestFile.readAsStringSync()) as Map<String, dynamic>;
      for (final c in manifest['cases'] as List) {
-@@ -202,7 +231,9 @@ void main() {
+@@ -202,7 +237,9 @@ void main() {
      }
    });
  
@@ -621,7 +628,7 @@ index a92a152..e1fe841 100644
      const segments = [
        'Daisy said,',
        'that was the cleanest clutch I have seen all week,',
-@@ -219,8 +250,8 @@ void main() {
+@@ -219,8 +256,8 @@ void main() {
      final events = <OnnxTtsEvent>[];
      final sub = tts.events.listen(events.add);
      final stopwatch = Stopwatch()..start();
@@ -632,7 +639,7 @@ index a92a152..e1fe841 100644
        language: 'en',
        voiceId: 'M2',
        utteranceId: 'three',
-@@ -236,7 +267,9 @@ void main() {
+@@ -236,7 +273,9 @@ void main() {
      expect(events.every((e) => e.utteranceId == 'three'), isTrue);
      final firstAudio = events[0].elapsed;
      final done = events[1].elapsed;
