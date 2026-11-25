@@ -107,6 +107,8 @@ class OnnxSession {
       inputs,
       outputs,
       _uses);
+  late final List<_Node> _pairedNodes =
+      _fusePointwisePairs(_channelwiseNodes, _weights, inputs, outputs, _uses);
   final Set<String> _captures;
   OnnxSession._(this.opset, this.inputs, this.outputs, this._weights,
       this._nodes, this._uses, this._captures);
@@ -234,13 +236,22 @@ class OnnxSession {
       void Function(String node)? onAccelerated}) async {
     if (backend == null) return run(feeds);
     final frame = _Frame(this, feeds, {});
-    final plan = backend is ChannelwiseBackend
-        ? _channelwiseNodes
-        : backend is PointwiseConvBackend
-            ? _pointwiseNodes
-            : _nodes;
+    final plan =
+        backend is PointwisePairBackend && backend.supportsPointwisePairs
+            ? _pairedNodes
+            : backend is ChannelwiseBackend
+                ? _channelwiseNodes
+                : backend is PointwiseConvBackend
+                    ? _pointwiseNodes
+                    : _nodes;
     for (final node in plan) {
       final args = frame.args(node);
+      if (node.op == _pointwisePair) {
+        final value = await _runPointwisePair(node, args.cast<Tensor?>(),
+            backend as PointwisePairBackend, onAccelerated);
+        frame.store(node, [value]);
+        continue;
+      }
       final product = (node.op == 'MatMul' ||
               node.op == 'Gemm' ||
               node.op == _rowProduct ||
@@ -303,6 +314,106 @@ abstract interface class ChannelwiseBackend implements PointwiseConvBackend {
       Tensor input, Tensor weights, Tensor? bias, int dilation);
   Float32List? scaledResidual(
       Tensor input, Tensor channelScale, Tensor residual);
+}
+
+/// Optional pair of unit-stride NCL pointwise convolutions with the exported
+/// GELU between them. A backend can keep the intermediate in its native layout.
+abstract interface class PointwisePairBackend implements ChannelwiseBackend {
+  bool get supportsPointwisePairs;
+  Future<Float32List?> pointwisePair(Tensor input, Tensor firstWeights,
+      Tensor? firstBias, Tensor secondWeights, Tensor? secondBias);
+}
+
+const _pointwisePair = '#PointwisePair';
+
+List<_Node> _fusePointwisePairs(
+    List<_Node> nodes,
+    Map<String, Tensor> weights,
+    Map<String, TensorInfo> inputs,
+    Map<String, TensorInfo> outputs,
+    Map<String, int> uses) {
+  final first = <String, _Node>{};
+  final removed = <_Node>{}, replacements = <_Node, _Node>{};
+  bool unit(_Node node) {
+    if (node.function != null ||
+        node.inputs.length < 2 ||
+        node.inputs.length > 3 ||
+        inputs.containsKey(node.inputs[1])) return false;
+    final w = weights[node.inputs[1]];
+    return w != null &&
+        w.type == TensorType.float32 &&
+        w.shape.length == 3 &&
+        w.shape.last == 1 &&
+        node.integer('group', 1) == 1 &&
+        _sameShape(node.ints('kernel_shape') ?? [1], [1]) &&
+        _sameShape(node.ints('strides') ?? [1], [1]) &&
+        _sameShape(node.ints('dilations') ?? [1], [1]) &&
+        _sameShape(node.ints('pads') ?? [0, 0], [0, 0]) &&
+        (node.attrs['auto_pad'] ?? 'NOTSET') == 'NOTSET';
+  }
+
+  for (final node in nodes) {
+    if (node.op == _pointwiseGelu &&
+        node.outputs.length == 1 &&
+        uses[node.outputs.single] == 1 &&
+        !outputs.containsKey(node.outputs.single) &&
+        unit(node)) {
+      first[node.outputs.single] = node;
+    } else if (node.op == 'Conv' && node.inputs.isNotEmpty && unit(node)) {
+      final begin = first[node.inputs.first];
+      if (begin == null) continue;
+      removed.add(begin);
+      replacements[node] = _Node(_pointwisePair, node.label, node.outputs, [
+        begin.inputs[0],
+        begin.inputs[1],
+        begin.inputs.elementAtOrNull(2) ?? '',
+        node.inputs[1],
+        node.inputs.elementAtOrNull(2) ?? '',
+      ], {
+        'first_label': begin.label
+      });
+    }
+  }
+  return [
+    for (final node in nodes)
+      if (!removed.contains(node)) replacements[node] ?? node
+  ];
+}
+
+Future<Tensor> _runPointwisePair(
+    _Node node,
+    List<Tensor?> args,
+    PointwisePairBackend backend,
+    void Function(String node)? onAccelerated) async {
+  final input = args[0]!, w1 = args[1]!, w2 = args[3]!;
+  final firstLabel = node.attrs['first_label'] as String;
+  final data = await backend.pointwisePair(input, w1, args[2], w2, args[4]);
+  if (data != null) {
+    final shape = [input.shape[0], w2.shape[0], input.shape[2]];
+    if (data.length != _size(shape)) {
+      throw StateError(
+          '${backend.name} returned an incorrect pointwise pair length');
+    }
+    onAccelerated?.call(firstLabel);
+    onAccelerated?.call(node.label);
+    return Tensor._(input.type, shape, data.asUnmodifiableView());
+  }
+  Future<Tensor> project(String label, List<Tensor?> inputs, bool gelu) async {
+    final conv = _Node('Conv', label, [], [], {});
+    final accelerated = await _accelerateConv1d(
+        gelu ? _Node(_pointwiseGelu, label, [], [], {}) : conv,
+        inputs,
+        backend);
+    if (accelerated != null) {
+      onAccelerated?.call(label);
+      return accelerated;
+    }
+    final result = _executeNode(conv, inputs).single;
+    return gelu ? _expandedGeluTensor(result) : result;
+  }
+
+  final intermediate = await project(firstLabel, [input, w1, args[2]], true);
+  return project(node.label, [intermediate, w2, args[4]], false);
 }
 
 const _scaledResidual = '#ScaledResidual';

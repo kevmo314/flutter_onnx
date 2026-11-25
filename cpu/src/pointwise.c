@@ -202,25 +202,9 @@ static void expand_channels(void *context, size_t index) {
       job->output + index * count, job->filters);
 }
 
-EXPORT int onnx_fc_run(void *filter, const float *x, float *y, int batch,
-                       int channels, int width, int filters, int gelu) {
-  const dense_filter *prepared = filter;
-  size_t nx = (size_t)channels * width, ny = (size_t)filters * width;
-  const int repeated = batch == 2 && memcmp(x, x + nx, nx * sizeof(float)) == 0;
-  if (repeated)
-    batch = 1;
-  const size_t rows = (size_t)batch * width;
-  const size_t padded =
-      prepared->contraction_weights ? (rows + 15) & ~(size_t)15 : rows;
-  float *samples = malloc(padded * channels * sizeof(float));
-  float *products = malloc(padded * filters * sizeof(float));
-  if (!samples || !products) {
-    free(samples);
-    free(products);
-    return 0;
-  }
-  for (int b = 0; b < batch; ++b)
-    vDSP_mtrans(x + b * nx, 1, samples + b * nx, 1, width, channels);
+static int dense_product(const dense_filter *prepared, float *samples,
+                         float *products, size_t rows, size_t padded,
+                         int channels, int filters) {
   int success = 1;
   if (prepared->contraction_weights) {
     // Time frames are contiguous rows. Pad the short row dimension so BLAS
@@ -240,23 +224,126 @@ EXPORT int onnx_fc_run(void *filter, const float *x, float *y, int batch,
       expand_channels(&job, 0);
     success = !job.status[0] && !job.status[1];
   }
+  return success;
+}
+
+static void finish_projection(const dense_filter *prepared,
+                              const float *products, float *y, int batch,
+                              int width, int filters, int gelu) {
+  const size_t ny = (size_t)width * filters;
+  for (int b = 0; b < batch; ++b)
+    vDSP_mtrans(products + b * ny, 1, y + b * ny, 1, filters, width);
+  const int parallel = gelu && prepared->threads > 1 && batch * ny >= 32768;
+  dense_activation job = {prepared, y, width, filters, batch * filters,
+                          parallel ? 2 : 1, gelu};
+  if (parallel)
+    dispatch_apply_f(job.workers,
+                     dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+                     &job, activate_projection);
+  else
+    activate_projection(&job, 0);
+}
+
+EXPORT int onnx_fc_run(void *filter, const float *x, float *y, int batch,
+                       int channels, int width, int filters, int gelu) {
+  const dense_filter *prepared = filter;
+  size_t nx = (size_t)channels * width, ny = (size_t)filters * width;
+  const int repeated = batch == 2 && memcmp(x, x + nx, nx * sizeof(float)) == 0;
+  if (repeated)
+    batch = 1;
+  const size_t rows = (size_t)batch * width;
+  const size_t padded =
+      prepared->contraction_weights ? (rows + 15) & ~(size_t)15 : rows;
+  float *samples = malloc(padded * channels * sizeof(float));
+  float *products = malloc(padded * filters * sizeof(float));
+  if (!samples || !products) {
+    free(samples);
+    free(products);
+    return 0;
+  }
+  for (int b = 0; b < batch; ++b)
+    vDSP_mtrans(x + b * nx, 1, samples + b * nx, 1, width, channels);
+  const int success = dense_product(prepared, samples, products, rows, padded,
+                                    channels, filters);
   if (success) {
-    for (int b = 0; b < batch; ++b)
-      vDSP_mtrans(products + b * ny, 1, y + b * ny, 1, filters, width);
-    const int parallel = gelu && prepared->threads > 1 && batch * ny >= 32768;
-    dense_activation job = {prepared, y, width, filters, batch * filters,
-                            parallel ? 2 : 1, gelu};
-    if (parallel)
-      dispatch_apply_f(job.workers,
-                       dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
-                       &job, activate_projection);
-    else
-      activate_projection(&job, 0);
+    finish_projection(prepared, products, y, batch, width, filters, gelu);
     if (repeated)
       memcpy(y + ny, y, ny * sizeof(float));
   }
   free(samples);
   free(products);
+  return success;
+}
+
+typedef struct {
+  float *values;
+  const dense_filter *filter;
+  size_t rows;
+  int channels, workers;
+} frame_activation;
+
+static void activate_frames(void *context, size_t worker) {
+  const frame_activation *job = context;
+  const size_t first = job->rows * worker / job->workers;
+  const size_t end = job->rows * (worker + 1) / job->workers;
+  float *values = job->values + first * job->channels;
+  if (job->filter->has_bias) {
+    for (size_t r = 0; r < end - first; ++r) {
+      float *row = values + r * job->channels;
+      for (int c = 0; c < job->channels; ++c)
+        row[c] += job->filter->bias[c];
+    }
+  }
+  activate_span(values, (end - first) * job->channels);
+}
+
+// Keep the expanded activations in frame-major order until the contraction
+// consumes them. Both matrix products retain their original float32 rounding.
+EXPORT int onnx_fc_pair(void *first, void *second, const float *x, float *y,
+                        int batch, int channels, int width, int hidden,
+                        int filters) {
+  const dense_filter *expand = first, *contract = second;
+  if (!expand->partitions || !contract->contraction_weights)
+    return 0;
+  const size_t nx = (size_t)width * channels, ny = (size_t)width * filters;
+  const int original_batch = batch;
+  if (batch == 2 && memcmp(x, x + nx, nx * sizeof(float)) == 0)
+    batch = 1;
+  size_t rows = (size_t)batch * width;
+  const size_t padded = (rows + 15) & ~(size_t)15;
+  float *edge = malloc(padded * (channels > filters ? channels : filters) * sizeof(float));
+  float *middle = malloc(padded * hidden * sizeof(float));
+  if (!edge || !middle) {
+    free(edge);
+    free(middle);
+    return 0;
+  }
+  for (int b = 0; b < batch; ++b)
+    vDSP_mtrans(x + b * nx, 1, edge + b * nx, 1, width, channels);
+  int success = dense_product(expand, edge, middle, rows, rows, channels, hidden);
+  if (success) {
+    const int parallel = expand->threads > 1 && rows * hidden >= 32768;
+    frame_activation activation = {middle, expand, rows, hidden, parallel ? 2 : 1};
+    if (parallel)
+      dispatch_apply_f(2, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+                       &activation, activate_frames);
+    else
+      activate_frames(&activation, 0);
+    const size_t count = (size_t)width * hidden;
+    if (batch == 2 && memcmp(middle, middle + count, count * sizeof(float)) == 0) {
+      batch = 1;
+      rows = width;
+    }
+    const size_t contraction_rows = (rows + 15) & ~(size_t)15;
+    success = dense_product(contract, middle, edge, rows, contraction_rows, hidden, filters);
+    if (success) {
+      finish_projection(contract, edge, y, batch, width, filters, 0);
+      if (batch != original_batch)
+        memcpy(y + ny, y, ny * sizeof(float));
+    }
+  }
+  free(middle);
+  free(edge);
   return success;
 }
 #else
@@ -267,6 +354,10 @@ EXPORT void *onnx_fc_create(const float *w, const float *b, int c, int f,
 EXPORT void onnx_fc_destroy(void *filter) {}
 EXPORT int onnx_fc_run(void *handle, const float *x, float *y, int b, int c,
                        int w, int f, int g) {
+  return 0;
+}
+EXPORT int onnx_fc_pair(void *first, void *second, const float *x, float *y,
+                        int b, int c, int w, int h, int f) {
   return 0;
 }
 #endif

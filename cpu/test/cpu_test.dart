@@ -5,6 +5,28 @@ import 'package:flutter_onnx/flutter_onnx.dart';
 import 'package:flutter_onnx_cpu/flutter_onnx_cpu.dart';
 import 'package:test/test.dart';
 
+class _IndividualProjectionBackend extends NativeCpuBackend {
+  @override
+  bool get supportsPointwisePairs => false;
+}
+
+class _DecliningPairBackend extends NativeCpuBackend {
+  var calls = 0;
+  @override
+  bool get supportsPointwisePairs => true;
+  @override
+  Future<Float32List?> pointwisePair(
+    Tensor input,
+    Tensor firstWeights,
+    Tensor? firstBias,
+    Tensor secondWeights,
+    Tensor? secondBias,
+  ) async {
+    calls++;
+    return null;
+  }
+}
+
 void main() {
   const backend = NativeCpuBackend();
   test('matrix row and column tails include byte offsets', () async {
@@ -140,6 +162,74 @@ void main() {
       }
     },
   );
+  test(
+    'declined projection pairs preserve outputs and visible activations',
+    () async {
+      final inputs = {
+        'x': Tensor.float32([1, 2, 3], [1, 0, 2, -1, 0, -2]),
+      };
+      for (final (encoded, exposed) in [
+        (
+          'CAk6kAMKGAoBeAoCdzESAWUaBmV4cGFuZCIEQ29udgoTCgFlCgFkEgJkMBoCZDAiA0RpdgoTCgJkMBIDZXJmGgNlcmYiA0VyZgobCgNlcmYKA29uZRIEcGx1cxoEcGx1cyIDQWRkCiAKAWUKBHBsdXMSB3Byb2R1Y3QaB3Byb2R1Y3QiA011bAoiCgdwcm9kdWN0CgRoYWxmEgZoaWRkZW4aBGdlbHUiA011bAohCgZoaWRkZW4KAncyEgNvdXQaCGNvbnRyYWN0IgRDb252EgRwYWlyKi4IBAgCCAEQAUICdzFKIAAAQMAAAADAAACAvwAAAAAAAIA/AAAAQAAAQEAAAIBAKi4IAggECAEQAUICdzJKIAAAQMAAAADAAACAvwAAAAAAAIA/AAAAQAAAQEAAAIBAKg4QAUIEaGFsZkoEAAAAPyoNEAFCA29uZUoEAACAPyoLEAFCAWRKBPMEtT9aFwoBeBISChAIARIMCgIIAQoCCAIKAggDYhkKA291dBISChAIARIMCgIIAQoCCAIKAggDQgQKABAS',
+          false,
+        ),
+        (
+          'CAk6rgMKGAoBeAoCdzESAWUaBmV4cGFuZCIEQ29udgoTCgFlCgFkEgJkMBoCZDAiA0RpdgoTCgJkMBIDZXJmGgNlcmYiA0VyZgobCgNlcmYKA29uZRIEcGx1cxoEcGx1cyIDQWRkCiAKAWUKBHBsdXMSB3Byb2R1Y3QaB3Byb2R1Y3QiA011bAoiCgdwcm9kdWN0CgRoYWxmEgZoaWRkZW4aBGdlbHUiA011bAohCgZoaWRkZW4KAncyEgNvdXQaCGNvbnRyYWN0IgRDb252EgRwYWlyKi4IBAgCCAEQAUICdzFKIAAAQMAAAADAAACAvwAAAAAAAIA/AAAAQAAAQEAAAIBAKi4IAggECAEQAUICdzJKIAAAQMAAAADAAACAvwAAAAAAAIA/AAAAQAAAQEAAAIBAKg4QAUIEaGFsZkoEAAAAPyoNEAFCA29uZUoEAACAPyoLEAFCAWRKBPMEtT9aFwoBeBISChAIARIMCgIIAQoCCAIKAggDYhkKA291dBISChAIARIMCgIIAQoCCAIKAggDYhwKBmhpZGRlbhISChAIARIMCgIIAQoCCAQKAggDQgQKABAS',
+          true,
+        ),
+      ]) {
+        final graph = OnnxSession.fromBytes(base64Decode(encoded));
+        final declining = _DecliningPairBackend();
+        final expected = await graph.runAsync(
+          inputs,
+          backend: _IndividualProjectionBackend(),
+        );
+        final actual = await graph.runAsync(inputs, backend: declining);
+        expect(declining.calls, exposed ? 0 : 1);
+        for (final output in expected.keys) {
+          expect(actual[output]!.toBytes(), expected[output]!.toBytes());
+        }
+      }
+    },
+  );
+
+  test('paired Apple projections agree with two independent calls', () async {
+    if (!backend.supportsPointwisePairs) return;
+    const channels = 128, hidden = 1024, filters = 128, width = 13;
+    final w1 = Tensor.float32([
+      hidden,
+      channels,
+      1,
+    ], List.generate(hidden * channels, (i) => (i % 13 - 6) / 64));
+    final w2 = Tensor.float32([
+      filters,
+      hidden,
+      1,
+    ], List.generate(hidden * filters, (i) => (i % 17 - 8) / 128));
+    final b1 = Tensor.float32([
+      hidden,
+    ], List.generate(hidden, (i) => (i % 13 - 5) / 32));
+    final b2 = Tensor.float32([filters], List.generate(filters, (i) => i % 7));
+    for (final repeated in [false, true]) {
+      final x = Tensor.float32(
+        [2, channels, width],
+        List.generate(
+          2 * channels * width,
+          (i) => (((repeated ? i % (channels * width) : i) % 19) - 9) / 16,
+        ),
+      );
+      final mid = await backend.pointwise(x, w1, b1, gelu: true);
+      final expected = await backend.pointwise(
+        Tensor.float32([2, hidden, width], mid!),
+        w2,
+        b2,
+        gelu: false,
+      );
+      final actual = await backend.pointwisePair(x, w1, b1, w2, b2);
+      expect(actual, orderedEquals(expected!));
+    }
+  });
+
   test('pointwise bias follows the rounded product before GELU', () async {
     const channels = 256, filters = 128, width = 9;
     final x = Tensor.float32(
