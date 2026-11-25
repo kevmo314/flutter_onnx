@@ -5,6 +5,11 @@ import 'package:flutter_onnx/flutter_onnx.dart';
 import 'package:flutter_onnx_cpu/flutter_onnx_cpu.dart';
 import 'package:test/test.dart';
 
+class _IndividualProjectionBackend extends NativeCpuBackend {
+  @override
+  bool get supportsPointwisePairs => false;
+}
+
 class _DecliningPairBackend extends NativeCpuBackend {
   var calls = 0;
   @override
@@ -175,7 +180,10 @@ void main() {
       ]) {
         final graph = OnnxSession.fromBytes(base64Decode(encoded));
         final declining = _DecliningPairBackend();
-        final expected = graph.run(inputs);
+        final expected = await graph.runAsync(
+          inputs,
+          backend: _IndividualProjectionBackend(),
+        );
         final actual = await graph.runAsync(inputs, backend: declining);
         expect(declining.calls, exposed ? 0 : 1);
         for (final output in expected.keys) {
