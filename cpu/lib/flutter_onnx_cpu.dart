@@ -228,6 +228,38 @@ external int _runDensePair(
   int filters,
 );
 
+@Native<Pointer<Void> Function(Pointer<Float>, Pointer<Float>, Int32, Int32)>(
+  symbol: 'onnx_metal_create',
+)
+external Pointer<Void> _createMetal(
+  Pointer<Float> weights,
+  Pointer<Float> bias,
+  int channels,
+  int filters,
+);
+@Native<Void Function(Pointer<Void>)>(symbol: 'onnx_metal_destroy')
+external void _destroyMetal(Pointer<Void> filter);
+@Native<
+  Int32 Function(
+    Pointer<Void>,
+    Pointer<Void>,
+    Pointer<Float>,
+    Pointer<Float>,
+    Int32,
+    Int32,
+    Int32,
+  )
+>(symbol: 'onnx_metal_run')
+external int _runMetal(
+  Pointer<Void> first,
+  Pointer<Void> second,
+  Pointer<Float> x,
+  Pointer<Float> y,
+  int batch,
+  int width,
+  int gelu,
+);
+
 class _DenseFilter implements Finalizable {
   static final _free = NativeFinalizer(
     Native.addressOf<NativeFunction<Void Function(Pointer<Void>)>>(
@@ -236,13 +268,20 @@ class _DenseFilter implements Finalizable {
   );
   final Pointer<Void> handle;
   final Tensor? bias;
-  _DenseFilter(this.handle, this.bias, int size) {
-    if (handle != nullptr) _free.attach(this, handle, externalSize: size);
+  static final _freeMetal = NativeFinalizer(
+    Native.addressOf<NativeFunction<Void Function(Pointer<Void>)>>(
+      _destroyMetal,
+    ),
+  );
+  _DenseFilter(this.handle, this.bias, int size, bool metal) {
+    if (handle != nullptr)
+      (metal ? _freeMetal : _free).attach(this, handle, externalSize: size);
   }
   static _DenseFilter create(
     Tensor weights,
     Tensor? bias,
     int threads,
+    bool metal,
   ) => using((arena) {
     final memory = arena<Float>(weights.length);
     memory.asTypedList(weights.length).setAll(0, weights.values as Float32List);
@@ -250,15 +289,18 @@ class _DenseFilter implements Finalizable {
     if (bias != null)
       b.asTypedList(bias.length).setAll(0, bias.values as Float32List);
     return _DenseFilter(
-      _createDenseFilter(
-        memory,
-        b,
-        weights.shape[1],
-        weights.shape[0],
-        threads,
-      ),
+      metal
+          ? _createMetal(memory, b, weights.shape[1], weights.shape[0])
+          : _createDenseFilter(
+              memory,
+              b,
+              weights.shape[1],
+              weights.shape[0],
+              threads,
+            ),
       bias,
       (weights.length + weights.shape.first) * 4,
+      metal,
     );
   }, malloc);
 }
@@ -389,7 +431,12 @@ class NativeCpuBackend implements PointwisePairBackend {
     final cache = _denseFilters[this] ??= Expando<_DenseFilter>();
     final existing = cache[weights];
     if (existing != null && identical(existing.bias, bias)) return existing;
-    return cache[weights] = _DenseFilter.create(weights, bias, threads);
+    return cache[weights] = _DenseFilter.create(
+      weights,
+      bias,
+      threads,
+      this is NativeMetalBackend,
+    );
   }
 
   @override
@@ -445,19 +492,21 @@ class NativeCpuBackend implements PointwisePairBackend {
     return using((arena) {
       final x = arena<Float>(input.length), y = arena<Float>(frames * filters);
       x.asTypedList(input.length).setAll(0, input.values as Float32List);
-      if (_runDensePair(
-            first.handle,
-            second.handle,
-            x,
-            y,
-            batch,
-            channels,
-            width,
-            hidden,
-            filters,
-          ) ==
-          0)
-        return null;
+      final success = this is NativeMetalBackend
+          ? _runMetal(first.handle, second.handle, x, y, batch, width, 0)
+          : _runDensePair(
+              first.handle,
+              second.handle,
+              x,
+              y,
+              batch,
+              channels,
+              width,
+              hidden,
+              filters,
+            );
+      if (success == 0) return null;
+      if (this case final NativeMetalBackend metal) metal._dispatches++;
       return Float32List.fromList(y.asTypedList(frames * filters));
     }, malloc);
   }
@@ -517,17 +566,28 @@ class NativeCpuBackend implements PointwisePairBackend {
       final filter = dense;
       if (filter != null &&
           filter.handle != nullptr &&
-          _runDenseFilter(
-                filter.handle,
-                x,
-                y,
-                batch,
-                channels,
-                width,
-                filters,
-                gelu ? 1 : 0,
-              ) !=
+          (this is NativeMetalBackend
+                  ? _runMetal(
+                      filter.handle,
+                      nullptr,
+                      x,
+                      y,
+                      batch,
+                      width,
+                      gelu ? 1 : 0,
+                    )
+                  : _runDenseFilter(
+                      filter.handle,
+                      x,
+                      y,
+                      batch,
+                      channels,
+                      width,
+                      filters,
+                      gelu ? 1 : 0,
+                    )) !=
               0) {
+        if (this case final NativeMetalBackend metal) metal._dispatches++;
         return Float32List.fromList(y.asTypedList(size));
       }
       final filtersByWeight = _caches[this] ??= Expando<_PackedFilters>();
@@ -719,4 +779,15 @@ class NativeCpuBackend implements PointwisePairBackend {
     _caches[this] = null;
     _denseFilters[this] = null;
   }
+}
+
+/// Runs supported pointwise projections on Metal and other operations on CPU.
+class NativeMetalBackend extends NativeCpuBackend {
+  NativeMetalBackend({super.maxThreads});
+  int _dispatches = 0;
+
+  /// Successful Metal command buffers, including pairs of fused projections.
+  int get dispatches => _dispatches;
+  @override
+  String get name => 'Metal and native CPU';
 }

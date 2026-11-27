@@ -49,12 +49,19 @@ jobs:
           if len(warm) != 5 or any(not 0 < r["rtf"] < 1 for r in warm):
               raise SystemExit(f"Warm synthesis exceeded the real-time budget: {warm}")
           PYTHON
+      - name: Compare Metal speech with ONNX Runtime CPU on the same Mac
+        if: runner.os == 'macOS'
+        run: |
+          SPEECH_METAL=1 "$RUNNER_TEMP/speech-cli/bundle/bin/supertonic_reference" --playback "$RUNNER_TEMP/playback" > "$RUNNER_TEMP/metal.log"
+          cat "$RUNNER_TEMP/metal.log"
+          python test/compare_speech.py "$RUNNER_TEMP/playback" "$RUNNER_TEMP/metal.log" "$RUNNER_TEMP/metal-comparison.json"
       - uses: actions/upload-artifact@v4
         with:
           name: playback-profile-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/playback.log
             ${{ runner.temp }}/engine-comparison.json
+            ${{ runner.temp }}/metal-comparison.json
   web:
     runs-on: ubuntu-latest
     steps:

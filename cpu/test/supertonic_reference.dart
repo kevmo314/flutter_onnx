@@ -41,7 +41,9 @@ Future<void> main(List<String> args) async {
         File('$dir/onnx/$name.onnx').readAsBytesSync(),
       ),
   };
-  const cpu = NativeCpuBackend();
+  final cpu = Platform.environment['SPEECH_METAL'] == '1'
+      ? NativeMetalBackend()
+      : const NativeCpuBackend();
   final cases = (manifest['cases'] as List).cast<Map>();
   if (cases.isEmpty) throw StateError('Empty speech corpus');
   for (var round = 0; round < (playback ? 6 : 1); round++) {
@@ -176,12 +178,15 @@ Future<void> main(List<String> args) async {
       }
     }
     if (playback) {
+      if (cpu is NativeMetalBackend && cpu.dispatches == 0)
+        throw StateError('No Metal projections executed');
       print(
         jsonEncode({
           'round': round + 1,
           'first_pcm_us': first.inMicroseconds,
           'synthesis_us': produced.inMicroseconds,
           'cpu_us': cpuMicros,
+          if (cpu is NativeMetalBackend) 'metal_dispatches': cpu.dispatches,
           'audio_us': audio.inMicroseconds,
           'rtf': produced.inMicroseconds / audio.inMicroseconds,
           'estimated_playback_end_us': finished.inMicroseconds,
