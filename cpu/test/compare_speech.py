@@ -1,5 +1,6 @@
 """Measure the previous RTChat CPU provider against the compiled Dart playback driver."""
 import json
+import os
 import statistics
 import sys
 import time
@@ -68,9 +69,23 @@ if __name__ == "__main__":
     report = {"onnxruntime_version": ort.__version__, "flutter_onnx": dart, "onnxruntime": reference}
     if len(dart) != len(reference):
         raise ValueError("Incomplete Dart timing samples")
+    label = "Metal and native CPU" if "metal_dispatches" in dart[-1] else "Native CPU"
+    summary = [
+        f"### Supertonic 3 on {label}",
+        "",
+        "Warm medians for the same 6.75 seconds of speech (five messages per engine).",
+        "",
+        "| Metric | flutter_onnx | ONNX Runtime CPU |",
+        "| --- | ---: | ---: |",
+    ]
     for metric in ("synthesis_us", "cpu_us", "first_pcm_us"):
         medians = [statistics.median(sample[metric] for sample in rows[1:]) for rows in (dart, reference)]
         if min(medians) <= 0:
             raise ValueError(f"Invalid {metric}: {medians}")
         print(f"{metric}: flutter_onnx={medians[0]:.0f} onnxruntime={medians[1]:.0f} ratio={medians[0]/medians[1]:.3f}")
+        title = {"synthesis_us": "Synthesis", "cpu_us": "Process CPU", "first_pcm_us": "First PCM"}[metric]
+        summary.append(f"| {title} | {medians[0] / 1e6:.3f} s | {medians[1] / 1e6:.3f} s |")
     output.write_text(json.dumps(report, indent=2))
+    if "GITHUB_STEP_SUMMARY" in os.environ:
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as step_summary:
+            print("\n".join(summary), file=step_summary)
