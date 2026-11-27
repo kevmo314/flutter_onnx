@@ -1,0 +1,51 @@
+// Copied into each RTChat checkout so both plugins execute the same entry point.
+import 'dart:convert';
+import 'dart:ffi';
+import 'dart:io';
+import 'dart:typed_data';
+import 'package:flutter/widgets.dart';
+import 'package:on_device_tts/on_device_tts.dart';
+import 'package:path_provider/path_provider.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final dir = await getApplicationDocumentsDirectory();
+  const label = String.fromEnvironment('BENCHMARK_ENGINE');
+  final result = File('${dir.path}/$label.json');
+  final output = <String, Object?>{};
+  final cpu = DynamicLibrary.process().lookupFunction<Long Function(), int Function()>('clock');
+  const texts = ['Daisy said,', 'that was the cleanest clutch I have seen all week,', 'GG everyone!'];
+  try {
+    final engine = await OnnxTts.load(modelDir: '${dir.path}/model', numThreads: 2);
+    final rows = <Map<String, int>>[];
+    try {
+      for (var round = 0; round < 6; round++) {
+        var wall = 0, used = 0, first = 0, count = 0;
+        for (var i = 0; i < texts.length; i++) {
+          final start = cpu();
+          final timer = Stopwatch()..start();
+          final speech = await engine.synthesize(texts[i], language: 'en', voiceId: 'M2', steps: 5, noiseSeed: i);
+          wall += timer.elapsedMicroseconds;
+          used += cpu() - start;
+          if (i == 0) first = wall;
+          count += speech.pcm.length;
+          if (speech.sampleRate != 44100) throw StateError('Unexpected sample rate');
+          if (round == 5) {
+            final pcm = Float32List.fromList(speech.pcm);
+            await File('${dir.path}/$label-$i.f32').writeAsBytes(pcm.buffer.asUint8List());
+          }
+        }
+        if (count != 297611) throw StateError('Unexpected sample count $count');
+        rows.add({'round': round+1, 'synthesis_us':wall, 'cpu_us':used, 'first_pcm_us':first});
+      }
+      output['rows'] = rows;
+    } finally {
+      await engine.unload();
+    }
+  } catch (e, stack) {
+    output['error'] = '$e\n$stack';
+  }
+  final tmp = File('${result.path}.tmp');
+  await tmp.writeAsString(jsonEncode(output));
+  await tmp.rename(result.path);
+}

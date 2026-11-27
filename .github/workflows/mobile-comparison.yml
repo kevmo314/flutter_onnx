@@ -1,0 +1,169 @@
+name: Mobile speech engine comparison
+on:
+  push:
+    paths: &paths
+      - "cpu/**"
+      - "lib/**"
+      - ".github/workflows/mobile-comparison.yml"
+  pull_request:
+    paths: *paths
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: mobile-engine-comparison-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+jobs:
+  profile:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: muxable/rtchat
+          ref: 2350d0bb7ed402aa22506f9aed6f2e1418be601f
+          fetch-depth: 2
+          path: rtchat
+      - uses: maxim-lobanov/setup-xcode@v1
+        if: runner.os == 'macOS'
+        with:
+          xcode-version: latest-stable
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - uses: actions/setup-java@v4
+        if: runner.os == 'Linux'
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        if: runner.os == 'Linux'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Stage the identical Supertonic 3 voice pack
+        run: |
+          python -m pip install huggingface_hub numpy
+          python - <<'PY'
+          from huggingface_hub import snapshot_download
+          import os
+          snapshot_download('Supertone/supertonic-3', revision='3cadd1ee6394adea1bd021217a0e650ede09a323',
+                            allow_patterns=['onnx/*','voice_styles/*'],local_dir=os.environ['RUNNER_TEMP']+'/model')
+          PY
+      - name: Build the old and migrated plugin with the same probe
+        working-directory: rtchat
+        run: |
+          set -euo pipefail
+          for engine in onnxruntime flutter_onnx; do
+            if [[ "$engine" == onnxruntime ]]; then
+              git checkout --detach 44fc55c6c246488500517b0527f149e88c02b24f
+              # The mirror keeps the upstream 1.24.2 checksums and updates the obsolete release URL.
+              python - <<'PY'
+          from pathlib import Path
+          p = Path('packages/on_device_tts/ios/on_device_tts/Package.swift')
+          p.write_text(p.read_text().replace('microsoft/onnxruntime-swift-package-manager", exact: "1.24.2"', 'thesagezm/onnxruntime-swift-package-manager", revision: "7dbd851c52a6e3889077f69dda8c9f8f438b60ab"'))
+          PY
+            else
+              git restore packages/on_device_tts/ios/on_device_tts/Package.swift pubspec.lock
+              git checkout --detach 2350d0bb7ed402aa22506f9aed6f2e1418be601f
+              cat > pubspec_overrides.yaml <<'EOF'
+          dependency_overrides:
+            flutter_onnx:
+              path: ..
+            flutter_onnx_cpu:
+              path: ../cpu
+          EOF
+            fi
+            mkdir -p integration_test
+            cp ../cpu/test/mobile/benchmark.dart.template integration_test/benchmark.dart
+            flutter pub get
+            if [[ "$RUNNER_OS" == Linux ]]; then
+              flutter build apk --profile --target-platform android-x64 -t integration_test/benchmark.dart --dart-define=BENCHMARK_ENGINE="$engine"
+              cp build/app/outputs/flutter-apk/app-profile.apk "$RUNNER_TEMP/$engine.apk"
+            else
+              flutter build ios --simulator --debug -t integration_test/benchmark.dart --dart-define=BENCHMARK_ENGINE="$engine"
+              cp -R build/ios/iphonesimulator/Runner.app "$RUNNER_TEMP/$engine.app"
+            fi
+          done
+      - name: Enable KVM
+        if: runner.os == 'Linux'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Measure both APKs on one Android emulator
+        if: runner.os == 'Linux'
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          PROFILE: |
+            set -euo pipefail
+            app=com.rtirl.chat
+            dir=/data/user/0/$app/app_flutter
+            adb root
+            adb wait-for-device
+            for engine in onnxruntime flutter_onnx; do
+              adb install -r "$RUNNER_TEMP/$engine.apk"
+              adb shell mkdir -p "$dir"
+              if [[ "$engine" == onnxruntime ]]; then adb push "$RUNNER_TEMP/model" "$dir/model"; fi
+              uid=$(adb shell stat -c %u "/data/user/0/$app" | tr -d '\r')
+              adb shell chown -R "$uid:$uid" "$dir"
+              adb shell restorecon -RF "$dir"
+              adb shell am force-stop "$app"
+              adb shell am start -n "$app/.MainActivity"
+              for ((i=0;i<180;i++)); do adb shell ls "$dir/$engine.json" >/dev/null 2>&1 && break; sleep 5; done
+              adb pull "$dir/$engine.json" "$RUNNER_TEMP/$engine.json"
+              cat "$RUNNER_TEMP/$engine.json"
+              for i in 0 1 2; do adb pull "$dir/$engine-$i.f32" "$RUNNER_TEMP/$engine-$i.f32"; done
+            done
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          ram-size: 4096M
+          script: bash -c "$PROFILE"
+      - name: Measure both apps on one iPhone simulator
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          device=$(xcrun simctl list devices available -j | python -c 'import json,sys; ds=json.load(sys.stdin)["devices"]; print(next(d["udid"] for r in sorted(ds,reverse=True) if "iOS" in r for d in ds[r] if d["name"].startswith("iPhone")))')
+          xcrun simctl boot "$device" || true
+          xcrun simctl bootstatus "$device" -b
+          for engine in onnxruntime flutter_onnx; do
+            xcrun simctl install "$device" "$RUNNER_TEMP/$engine.app"
+            dir="$(xcrun simctl get_app_container "$device" com.rtirl.chat data)/Documents"
+            mkdir -p "$dir"
+            [[ -d "$dir/model" ]] || cp -cR "$RUNNER_TEMP/model" "$dir/model"
+            xcrun simctl launch --terminate-running-process "$device" com.rtirl.chat
+            for ((i=0;i<180;i++)); do [[ -f "$dir/$engine.json" ]] && break; sleep 5; done
+            cat "$dir/$engine.json"
+            cp "$dir/$engine.json" "$dir/$engine-"*.f32 "$RUNNER_TEMP/"
+          done
+      - name: Compare waveforms and warm process measurements
+        working-directory: ${{ runner.temp }}
+        run: |
+          python - <<'PY'
+          import json, statistics
+          from pathlib import Path
+          import numpy as np
+          for i in range(3):
+              old, new = [np.fromfile(f'{engine}-{i}.f32',dtype='<f4') for engine in ('onnxruntime','flutter_onnx')]
+              if old.shape != new.shape or not np.allclose(old,new,atol=0.001,rtol=0):
+                  raise ValueError(f'Waveform mismatch for segment {i}')
+          for engine in ('onnxruntime','flutter_onnx'):
+              rows=json.loads(Path(engine+'.json').read_text())['rows']
+              if len(rows)!=6 or any(r['cpu_us']<=0 for r in rows): raise ValueError(rows)
+              print(engine,{m:statistics.median(r[m] for r in rows[1:]) for m in ('cpu_us','synthesis_us','first_pcm_us')})
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: paired-mobile-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/onnxruntime.json
+            ${{ runner.temp }}/flutter_onnx.json
