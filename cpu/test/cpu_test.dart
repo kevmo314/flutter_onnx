@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter_onnx/flutter_onnx.dart';
@@ -193,7 +195,7 @@ void main() {
     },
   );
 
-  test('paired Apple projections agree with two independent calls', () async {
+  test('paired native projections agree with two independent calls', () async {
     if (!backend.supportsPointwisePairs) return;
     const channels = 128, hidden = 1024, filters = 128, width = 13;
     final w1 = Tensor.float32([
@@ -227,6 +229,44 @@ void main() {
       );
       final actual = await backend.pointwisePair(x, w1, b1, w2, b2);
       expect(actual, orderedEquals(expected!));
+    }
+  });
+
+  test('Metal computes a tail frame and preserves distinct batches', () async {
+    if (!Platform.isMacOS && !Platform.isIOS) return;
+    const channels = 256, hidden = 1024, width = 129;
+    final metal = NativeMetalBackend();
+    final x = Tensor.float32([
+      2,
+      channels,
+      width,
+    ], List.generate(2 * channels * width, (i) => (i % 23 - 11) / 16));
+    final w1 = Tensor.float32([
+      hidden,
+      channels,
+      1,
+    ], List.generate(hidden * channels, (i) => (i % 29 - 14) / 512));
+    final w2 = Tensor.float32([
+      channels,
+      hidden,
+      1,
+    ], List.generate(channels * hidden, (i) => (i % 13 - 6) / 256));
+    final bias = Tensor.float32([
+      hidden,
+    ], List.generate(hidden, (i) => (i % 11 - 5) / 32));
+    try {
+      final expected = await backend.pointwisePair(x, w1, bias, w2, null);
+      final result = await metal.pointwisePair(x, w1, bias, w2, null);
+      expect(result, isNotNull);
+      expect(metal.dispatches, greaterThan(0));
+      expect(result!.length, expected!.length);
+      var peak = 0.0;
+      for (var i = 0; i < result.length; i++) {
+        peak = math.max(peak, (expected[i] - result[i]).abs());
+      }
+      expect(peak, lessThan(1e-4));
+    } finally {
+      await metal.close();
     }
   });
 

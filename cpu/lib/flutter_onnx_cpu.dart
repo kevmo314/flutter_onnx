@@ -94,6 +94,33 @@ external int _pointwise(
 );
 
 @Native<
+  Int32 Function(
+    Pointer<Float>,
+    Pointer<Float>,
+    Pointer<Float>,
+    Pointer<Float>,
+    Int32,
+    Int32,
+    Int32,
+    Int32,
+    Int32,
+    Int32,
+  )
+>(symbol: 'onnx_packed_pair')
+external int _packedPair(
+  Pointer<Float> input,
+  Pointer<Float> first,
+  Pointer<Float> second,
+  Pointer<Float> output,
+  int batch,
+  int channels,
+  int width,
+  int hidden,
+  int filters,
+  int threads,
+);
+
+@Native<
   Void Function(
     Pointer<Float>,
     Pointer<Float>,
@@ -228,6 +255,38 @@ external int _runDensePair(
   int filters,
 );
 
+@Native<Pointer<Void> Function(Pointer<Float>, Pointer<Float>, Int32, Int32)>(
+  symbol: 'onnx_metal_create',
+)
+external Pointer<Void> _createMetal(
+  Pointer<Float> weights,
+  Pointer<Float> bias,
+  int channels,
+  int filters,
+);
+@Native<Void Function(Pointer<Void>)>(symbol: 'onnx_metal_destroy')
+external void _destroyMetal(Pointer<Void> filter);
+@Native<
+  Int32 Function(
+    Pointer<Void>,
+    Pointer<Void>,
+    Pointer<Float>,
+    Pointer<Float>,
+    Int32,
+    Int32,
+    Int32,
+  )
+>(symbol: 'onnx_metal_run')
+external int _runMetal(
+  Pointer<Void> first,
+  Pointer<Void> second,
+  Pointer<Float> x,
+  Pointer<Float> y,
+  int batch,
+  int width,
+  int gelu,
+);
+
 class _DenseFilter implements Finalizable {
   static final _free = NativeFinalizer(
     Native.addressOf<NativeFunction<Void Function(Pointer<Void>)>>(
@@ -236,13 +295,20 @@ class _DenseFilter implements Finalizable {
   );
   final Pointer<Void> handle;
   final Tensor? bias;
-  _DenseFilter(this.handle, this.bias, int size) {
-    if (handle != nullptr) _free.attach(this, handle, externalSize: size);
+  static final _freeMetal = NativeFinalizer(
+    Native.addressOf<NativeFunction<Void Function(Pointer<Void>)>>(
+      _destroyMetal,
+    ),
+  );
+  _DenseFilter(this.handle, this.bias, int size, bool metal) {
+    if (handle != nullptr)
+      (metal ? _freeMetal : _free).attach(this, handle, externalSize: size);
   }
   static _DenseFilter create(
     Tensor weights,
     Tensor? bias,
     int threads,
+    bool metal,
   ) => using((arena) {
     final memory = arena<Float>(weights.length);
     memory.asTypedList(weights.length).setAll(0, weights.values as Float32List);
@@ -250,15 +316,18 @@ class _DenseFilter implements Finalizable {
     if (bias != null)
       b.asTypedList(bias.length).setAll(0, bias.values as Float32List);
     return _DenseFilter(
-      _createDenseFilter(
-        memory,
-        b,
-        weights.shape[1],
-        weights.shape[0],
-        threads,
-      ),
+      metal
+          ? _createMetal(memory, b, weights.shape[1], weights.shape[0])
+          : _createDenseFilter(
+              memory,
+              b,
+              weights.shape[1],
+              weights.shape[0],
+              threads,
+            ),
       bias,
       (weights.length + weights.shape.first) * 4,
+      metal,
     );
   }, malloc);
 }
@@ -389,11 +458,27 @@ class NativeCpuBackend implements PointwisePairBackend {
     final cache = _denseFilters[this] ??= Expando<_DenseFilter>();
     final existing = cache[weights];
     if (existing != null && identical(existing.bias, bias)) return existing;
-    return cache[weights] = _DenseFilter.create(weights, bias, threads);
+    return cache[weights] = _DenseFilter.create(
+      weights,
+      bias,
+      threads,
+      this is NativeMetalBackend,
+    );
+  }
+
+  _PackedFilters _packed(Tensor weights, Tensor? bias) {
+    final cache = _caches[this] ??= Expando<_PackedFilters>();
+    final prepared = cache[weights];
+    if (prepared != null && identical(prepared.bias, bias)) return prepared;
+    return cache[weights] = _PackedFilters(weights, bias);
   }
 
   @override
-  bool get supportsPointwisePairs => Platform.isMacOS || Platform.isIOS;
+  bool get supportsPointwisePairs =>
+      Platform.isMacOS ||
+      Platform.isIOS ||
+      Platform.isAndroid ||
+      Platform.isLinux;
 
   @override
   Future<Float32List?> pointwisePair(
@@ -430,7 +515,8 @@ class NativeCpuBackend implements PointwisePairBackend {
       return null;
     final filters = secondWeights.shape[0];
     final frames = batch * width;
-    if (filters > hidden ||
+    if (input.length > 16 * 1024 * 1024 ||
+        filters > hidden ||
         frames * hidden > 16 * 1024 * 1024 ||
         frames * firstWeights.length < 250000 ||
         frames * secondWeights.length < 250000)
@@ -439,25 +525,51 @@ class NativeCpuBackend implements PointwisePairBackend {
       1,
       math.min(maxThreads, Platform.numberOfProcessors),
     );
+    if (Platform.isLinux || Platform.isAndroid) {
+      final first = _packed(firstWeights, firstBias),
+          second = _packed(secondWeights, secondBias);
+      return using((arena) {
+        final x = arena<Float>(input.length),
+            y = arena<Float>(frames * filters);
+        x.asTypedList(input.length).setAll(0, input.values as Float32List);
+        if (_packedPair(
+              x,
+              first.data,
+              second.data,
+              y,
+              batch,
+              channels,
+              width,
+              hidden,
+              filters,
+              threads,
+            ) ==
+            0)
+          return null;
+        return Float32List.fromList(y.asTypedList(frames * filters));
+      }, malloc);
+    }
     final first = _dense(firstWeights, firstBias, threads);
     final second = _dense(secondWeights, secondBias, threads);
     if (first.handle == nullptr || second.handle == nullptr) return null;
     return using((arena) {
       final x = arena<Float>(input.length), y = arena<Float>(frames * filters);
       x.asTypedList(input.length).setAll(0, input.values as Float32List);
-      if (_runDensePair(
-            first.handle,
-            second.handle,
-            x,
-            y,
-            batch,
-            channels,
-            width,
-            hidden,
-            filters,
-          ) ==
-          0)
-        return null;
+      final success = this is NativeMetalBackend
+          ? _runMetal(first.handle, second.handle, x, y, batch, width, 0)
+          : _runDensePair(
+              first.handle,
+              second.handle,
+              x,
+              y,
+              batch,
+              channels,
+              width,
+              hidden,
+              filters,
+            );
+      if (success == 0) return null;
+      if (this case final NativeMetalBackend metal) metal._dispatches++;
       return Float32List.fromList(y.asTypedList(frames * filters));
     }, malloc);
   }
@@ -517,24 +629,31 @@ class NativeCpuBackend implements PointwisePairBackend {
       final filter = dense;
       if (filter != null &&
           filter.handle != nullptr &&
-          _runDenseFilter(
-                filter.handle,
-                x,
-                y,
-                batch,
-                channels,
-                width,
-                filters,
-                gelu ? 1 : 0,
-              ) !=
+          (this is NativeMetalBackend
+                  ? _runMetal(
+                      filter.handle,
+                      nullptr,
+                      x,
+                      y,
+                      batch,
+                      width,
+                      gelu ? 1 : 0,
+                    )
+                  : _runDenseFilter(
+                      filter.handle,
+                      x,
+                      y,
+                      batch,
+                      channels,
+                      width,
+                      filters,
+                      gelu ? 1 : 0,
+                    )) !=
               0) {
+        if (this case final NativeMetalBackend metal) metal._dispatches++;
         return Float32List.fromList(y.asTypedList(size));
       }
-      final filtersByWeight = _caches[this] ??= Expando<_PackedFilters>();
-      var prepared = filtersByWeight[weights];
-      if (prepared == null || !identical(prepared.bias, bias)) {
-        prepared = filtersByWeight[weights] = _PackedFilters(weights, bias);
-      }
+      final prepared = _packed(weights, bias);
       if (_pointwise(
             x,
             prepared.data,
@@ -719,4 +838,15 @@ class NativeCpuBackend implements PointwisePairBackend {
     _caches[this] = null;
     _denseFilters[this] = null;
   }
+}
+
+/// Runs supported pointwise projections on Metal and other operations on CPU.
+class NativeMetalBackend extends NativeCpuBackend {
+  NativeMetalBackend({super.maxThreads});
+  int _dispatches = 0;
+
+  /// Successful Metal command buffers, including pairs of fused projections.
+  int get dispatches => _dispatches;
+  @override
+  String get name => 'Metal and native CPU';
 }

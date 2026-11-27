@@ -79,7 +79,11 @@ pointwise convolutions can reuse their prepared filters. The backend uses
 Accelerate on Apple devices and SIMD kernels on Android and Linux. It also
 handles depthwise convolution and normalization across channels in NCL layout.
 
-On Apple, large pointwise convolutions use Accelerate. Channel expansions use prepared BNNS fully connected layers. Large expansions divide the output channels across two filters when the backend has at least two worker threads. Each filter accumulates over the full input-channel dimension. For projections with at least as many input channels as output channels, the backend pads the frame dimension and uses BLAS matrix multiplication. Both paths reuse their weights across calls and add bias after the product rounds to float32.
+On iOS and macOS, pass `NativeMetalBackend()` to `runAsync` to use Metal for supported FP32 pointwise projections. It keeps prepared weights on the GPU and executes two projections and GELU in one command buffer. Other operations use the native CPU backend. Its `dispatches` counter records completed Metal command buffers.
+
+On Android and Linux, a fused Conv–GELU–Conv pair writes the expanded frames directly in the layout the second convolution reads. Supported x86-64 CPUs process 12 frames and up to 32 output channels per AVX-512 tile.
+
+With `NativeCpuBackend` on Apple, large pointwise convolutions use Accelerate. Channel expansions use prepared BNNS fully connected layers. Large expansions divide the output channels across two filters when the backend has at least two worker threads. Each filter accumulates over the full input-channel dimension. For projections with at least as many input channels as output channels, the backend pads the frame dimension and uses BLAS matrix multiplication. Both paths reuse their weights across calls and add bias after the product rounds to float32.
 
 The RTChat mobile speech workflow builds the app with the runtime checkout
 and exercises its native audio player. It measures three fresh synthesis
