@@ -435,12 +435,57 @@ static INLINE void compute(const product_job *job) {
 }
 
 #if defined(__x86_64__)
+#include <immintrin.h>
+enum { wide_frames = 12 };
+
+// Two output panels share each broadcast input. The 24 accumulators fit in
+// AVX-512 registers and cover twelve frames before reading the next weights.
+__attribute__((target("avx512f,fma"))) static void compute_wide(const product_job *job) {
+  const int k = job->channels;
+  const size_t panel_size = (size_t)(k + 1) * filters_per_tile;
+  for (int f = job->first; f < job->end; f += 2 * filters_per_tile) {
+    const int pair = f + filters_per_tile < job->end;
+    const float *a = job->weights + (size_t)f * (k + 1);
+    for (int frame = 0; frame < job->frames; frame += wide_frames) {
+      const float *x = job->samples + (size_t)frame * k;
+      __m512 lo[wide_frames] = {0}, hi[wide_frames] = {0};
+      for (int d = 0; d < k; ++d) {
+        const float *w = a + (size_t)d * filters_per_tile;
+        const __m512 left = _mm512_loadu_ps(w);
+        const __m512 right = pair ? _mm512_loadu_ps(w + panel_size) : _mm512_setzero_ps();
+#pragma GCC unroll 12
+        for (int t = 0; t < wide_frames; ++t) {
+          const __m512 sample = _mm512_set1_ps(x[(size_t)d * wide_frames + t]);
+          lo[t] = _mm512_fmadd_ps(left, sample, lo[t]);
+          hi[t] = _mm512_fmadd_ps(right, sample, hi[t]);
+        }
+      }
+      const int count = pair ? 2 : 1;
+      for (int part = 0; part < count; ++part) {
+        const __m512 bias = _mm512_loadu_ps(a + (size_t)k * filters_per_tile + part * panel_size);
+        for (int t = 0; t < wide_frames && frame + t < job->frames; ++t) {
+          const int b = (frame + t) / job->width, time = (frame + t) % job->width;
+          float values[filters_per_tile];
+          _mm512_storeu_ps(values, _mm512_add_ps(part ? hi[t] : lo[t], bias));
+          float *dst = job->output + ((size_t)b * job->filters + f + part * filters_per_tile) * job->width + time;
+          for (int j = 0; j < filters_per_tile; ++j)
+            dst[(size_t)j * job->width] = job->gelu ? expanded_gelu(values[j]) : values[j];
+        }
+      }
+    }
+  }
+}
+
 __attribute__((target("avx"))) static void compute_avx(const product_job *job) {
   compute(job);
 }
 #endif
 static void *run_job(void *arg) {
 #if defined(__x86_64__)
+  if (__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("fma")) {
+    compute_wide(arg);
+    return NULL;
+  }
   if (__builtin_cpu_supports("avx")) {
     compute_avx(arg);
     return NULL;
@@ -503,15 +548,20 @@ EXPORT int onnx_pointwise_run(const float *x, const float *weights, float *y,
   if (!direct)
     free(product);
 #elif defined(__linux__) && (defined(__GNUC__) || defined(__clang__))
+  int packing = frames_per_tile;
+#if defined(__x86_64__)
+  if (__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("fma"))
+    packing = wide_frames;
+#endif
   const int frames = batch * width;
-  const size_t padded = ((size_t)frames + frames_per_tile - 1) /
-                        frames_per_tile * frames_per_tile;
+  const size_t padded = ((size_t)frames + packing - 1) /
+                        packing * packing;
   float *packed = malloc(padded * channels * sizeof(float));
   if (!packed)
     return 0;
-  for (int frame = 0; frame < frames; frame += frames_per_tile) {
-    const float *row[frames_per_tile];
-    for (int t = 0; t < frames_per_tile; ++t) {
+  for (int frame = 0; frame < frames; frame += packing) {
+    const float *row[12];
+    for (int t = 0; t < packing; ++t) {
       const int p = frame + t;
       row[t] = p < frames
                    ? x + (size_t)(p / width) * channels * width + p % width
@@ -519,8 +569,8 @@ EXPORT int onnx_pointwise_run(const float *x, const float *weights, float *y,
     }
     float *dst = packed + (size_t)frame * channels;
     for (int c = 0; c < channels; ++c)
-      for (int t = 0; t < frames_per_tile; ++t)
-        dst[c * frames_per_tile + t] = row[t] ? row[t][(size_t)c * width] : 0;
+      for (int t = 0; t < packing; ++t)
+        dst[c * packing + t] = row[t] ? row[t][(size_t)c * width] : 0;
   }
   const int tiles = filters / filters_per_tile;
   if (threads > tiles)

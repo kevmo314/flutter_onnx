@@ -2,6 +2,7 @@
 // The fixtures contain RTChat's multilingual corpus synthesized by Supertone.
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ffi';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -19,6 +20,10 @@ Iterable<num> flatten(Object value) sync* {
     }
   }
 }
+
+// clock() counts CPU used by all process threads in POSIX microseconds.
+final _processCpu = DynamicLibrary.process()
+    .lookupFunction<Long Function(), int Function()>('clock');
 
 Future<void> main(List<String> args) async {
   final playback = args.length == 2 && args.first == '--playback';
@@ -39,7 +44,8 @@ Future<void> main(List<String> args) async {
   const cpu = NativeCpuBackend();
   final cases = (manifest['cases'] as List).cast<Map>();
   if (cases.isEmpty) throw StateError('Empty speech corpus');
-  for (var round = 0; round < (playback ? 3 : 1); round++) {
+  for (var round = 0; round < (playback ? 6 : 1); round++) {
+    var cpuMicros = 0;
     var produced = Duration.zero;
     var finished = Duration.zero;
     var audio = Duration.zero;
@@ -66,6 +72,7 @@ Future<void> main(List<String> args) async {
       final textMask = mask(ids.shape.last);
       final durationStyle = style('style_dp'), context = style('style_ttl');
       var latent = fixture('noise');
+      final cpuStart = playback ? _processCpu() : 0;
       final watch = Stopwatch()..start();
       final prediction = graphs['duration_predictor']!
           .run({
@@ -101,6 +108,7 @@ Future<void> main(List<String> args) async {
         'latent': latent,
       }, backend: cpu))['wav_tts']!;
       watch.stop();
+      if (playback) cpuMicros += _processCpu() - cpuStart;
       final expected = Float32List.sublistView(
         File(
           '$root/${playback ? example['tensors']['wav']['file'] : example['pcm']}',
@@ -173,6 +181,7 @@ Future<void> main(List<String> args) async {
           'round': round + 1,
           'first_pcm_us': first.inMicroseconds,
           'synthesis_us': produced.inMicroseconds,
+          'cpu_us': cpuMicros,
           'audio_us': audio.inMicroseconds,
           'rtf': produced.inMicroseconds / audio.inMicroseconds,
           'estimated_playback_end_us': finished.inMicroseconds,
