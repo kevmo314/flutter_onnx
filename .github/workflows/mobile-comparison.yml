@@ -71,7 +71,8 @@ jobs:
           p.write_text(p.read_text().replace('microsoft/onnxruntime-swift-package-manager", exact: "1.24.2"', 'thesagezm/onnxruntime-swift-package-manager", revision: "7dbd851c52a6e3889077f69dda8c9f8f438b60ab"'))
           PY
             else
-              git restore packages/on_device_tts/ios/on_device_tts/Package.swift pubspec.lock
+              # Flutter migrates tracked Xcode project files in this disposable CI checkout.
+              git restore --worktree .
               git checkout --detach 2350d0bb7ed402aa22506f9aed6f2e1418be601f
               cat > pubspec_overrides.yaml <<'EOF'
           dependency_overrides:
