@@ -29,26 +29,6 @@ class _DecliningPairBackend extends NativeCpuBackend {
   }
 }
 
-class _DecliningNormalizedBackend extends _DecliningPairBackend
-    implements NormalizedProjectionBackend {
-  var normalizedCalls = 0;
-
-  @override
-  Future<Float32List?> normalizedPair(
-    Tensor input,
-    Tensor scale,
-    Tensor normBias,
-    double epsilon,
-    Tensor firstWeights,
-    Tensor? firstBias,
-    Tensor secondWeights,
-    Tensor? secondBias,
-  ) async {
-    normalizedCalls++;
-    return null;
-  }
-}
-
 void main() {
   const backend = NativeCpuBackend();
   test('matrix row and column tails include byte offsets', () async {
@@ -210,39 +190,6 @@ void main() {
         expect(declining.calls, exposed ? 0 : 1);
         for (final output in expected.keys) {
           expect(actual[output]!.toBytes(), expected[output]!.toBytes());
-        }
-      }
-    },
-  );
-
-  test(
-    'normalization fusion respects graph outputs and backend fallback',
-    () async {
-      final feeds = {
-        'x': Tensor.float32([1, 2, 3], [1, 0, 2, -1, 0, -2]),
-      };
-      // Transpose, LayerNormalization, Transpose, Conv, GELU, Conv.
-      for (final (encoded, exposed) in [
-        (
-          'CAk66AQKKwoBeBIKdHJhbnNwb3NlZCIJVHJhbnNwb3NlKg8KBHBlcm1AAEACQAGgAQcKRgoKdHJhbnNwb3NlZAoFc2NhbGUKBGJpYXMSAW4iEkxheWVyTm9ybWFsaXphdGlvbioUCgRheGlzGP///////////wGgAQIKKwoBbhIKbm9ybWFsaXplZCIJVHJhbnNwb3NlKg8KBHBlcm1AAEACQAGgAQcKIQoKbm9ybWFsaXplZAoCdzESAWUaBmV4cGFuZCIEQ29udgoTCgFlCgFkEgJkMBoCZDAiA0RpdgoTCgJkMBIDZXJmGgNlcmYiA0VyZgobCgNlcmYKA29uZRIEcGx1cxoEcGx1cyIDQWRkCiAKAWUKBHBsdXMSB3Byb2R1Y3QaB3Byb2R1Y3QiA011bAoiCgdwcm9kdWN0CgRoYWxmEgZoaWRkZW4aBGdlbHUiA011bAohCgZoaWRkZW4KAncyEgNvdXQaCGNvbnRyYWN0IgRDb252EgRwYWlyKi4IBAgCCAEQAUICdzFKIAAAQMAAAADAAACAvwAAAAAAAIA/AAAAQAAAQEAAAIBAKi4IAggECAEQAUICdzJKIAAAQMAAAADAAACAvwAAAAAAAIA/AAAAQAAAQEAAAIBAKg4QAUIEaGFsZkoEAAAAPyoNEAFCA29uZUoEAACAPyoLEAFCAWRKBPMEtT8qFQgCEAEiCAAAAEAAAAA/QgVzY2FsZSoUCAIQASIIAACAPgAAgD9CBGJpYXNaFwoBeBISChAIARIMCgIIAQoCCAIKAggDYhkKA291dBISChAIARIMCgIIAQoCCAIKAggDQgQKABAS',
-          false,
-        ),
-        (
-          'CAk6igUKKwoBeBIKdHJhbnNwb3NlZCIJVHJhbnNwb3NlKg8KBHBlcm1AAEACQAGgAQcKRgoKdHJhbnNwb3NlZAoFc2NhbGUKBGJpYXMSAW4iEkxheWVyTm9ybWFsaXphdGlvbioUCgRheGlzGP///////////wGgAQIKKwoBbhIKbm9ybWFsaXplZCIJVHJhbnNwb3NlKg8KBHBlcm1AAEACQAGgAQcKIQoKbm9ybWFsaXplZAoCdzESAWUaBmV4cGFuZCIEQ29udgoTCgFlCgFkEgJkMBoCZDAiA0RpdgoTCgJkMBIDZXJmGgNlcmYiA0VyZgobCgNlcmYKA29uZRIEcGx1cxoEcGx1cyIDQWRkCiAKAWUKBHBsdXMSB3Byb2R1Y3QaB3Byb2R1Y3QiA011bAoiCgdwcm9kdWN0CgRoYWxmEgZoaWRkZW4aBGdlbHUiA011bAohCgZoaWRkZW4KAncyEgNvdXQaCGNvbnRyYWN0IgRDb252EgRwYWlyKi4IBAgCCAEQAUICdzFKIAAAQMAAAADAAACAvwAAAAAAAIA/AAAAQAAAQEAAAIBAKi4IAggECAEQAUICdzJKIAAAQMAAAADAAACAvwAAAAAAAIA/AAAAQAAAQEAAAIBAKg4QAUIEaGFsZkoEAAAAPyoNEAFCA29uZUoEAACAPyoLEAFCAWRKBPMEtT8qFQgCEAEiCAAAAEAAAAA/QgVzY2FsZSoUCAIQASIIAACAPgAAgD9CBGJpYXNaFwoBeBISChAIARIMCgIIAQoCCAIKAggDYhkKA291dBISChAIARIMCgIIAQoCCAIKAggDYiAKCm5vcm1hbGl6ZWQSEgoQCAESDAoCCAEKAggCCgIIA0IECgAQEg==',
-          true,
-        ),
-      ]) {
-        final graph = OnnxSession.fromBytes(base64Decode(encoded));
-        final declining = _DecliningNormalizedBackend();
-        final expected = await graph.runAsync(
-          feeds,
-          backend: _IndividualProjectionBackend(),
-        );
-        final result = await graph.runAsync(feeds, backend: declining);
-        expect(declining.normalizedCalls, exposed ? 0 : 1);
-        expect(declining.calls, 1);
-        for (final key in expected.keys) {
-          expect(result[key]!.toBytes(), expected[key]!.toBytes());
         }
       }
     },

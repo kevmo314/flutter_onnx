@@ -26,7 +26,6 @@ void main(List<String> args) async {
           'Accelerate',
           'Foundation',
           'Metal',
-          'MetalPerformanceShaders',
         ],
       ],
     ).run(input: input, output: output);
