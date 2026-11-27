@@ -117,8 +117,12 @@ jobs:
             adb wait-for-device
             for engine in onnxruntime flutter_onnx; do
               adb install -r "$RUNNER_TEMP/$engine.apk"
-              adb shell mkdir -p "$dir"
-              if [[ "$engine" == onnxruntime ]]; then adb push "$RUNNER_TEMP/model" "$dir/model"; fi
+              if [[ "$engine" == onnxruntime ]]; then
+                owner=()
+                if adb shell run-as "$app" id >/dev/null 2>&1; then owner=(run-as "$app"); fi
+                adb shell "${owner[@]}" mkdir -p "$dir/model"
+                tar -C "$RUNNER_TEMP/model" -cf - . | adb shell -T "${owner[@]}" tar -xf - -C "$dir/model"
+              fi
               uid=$(adb shell stat -c %u "/data/user/0/$app" | tr -d '\r')
               adb shell chown -R "$uid:$uid" "$dir"
               adb shell restorecon -RF "$dir"
