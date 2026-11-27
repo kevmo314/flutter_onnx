@@ -85,7 +85,7 @@ jobs:
         if: matrix.browser == 'firefox'
         with:
           firefox-version: latest
-      - run: dart pub get
+      - run: dart pub get --no-example
       - run: dart test -p ${{ matrix.browser }}
         env:
           MOZ_HEADLESS: '1'
