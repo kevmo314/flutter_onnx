@@ -34,17 +34,17 @@ static NSString *const projectionSource =
                           uint2 tid [[thread_position_in_threadgroup]],
                           uint2 gid [[threadgroup_position_in_grid]]) {
         threadgroup float samples[16][16], filters[16][32];
-        uint thread = tid.y * 8 + tid.x;
+        uint localIndex = tid.y * 8 + tid.x;
         uint row = gid.y * 16 + 2 * tid.y, col = gid.x * 32 + 4 * tid.x;
         /* Round sixteen-term partial sums before accumulating long channel reductions. */
         float4 totalA = 0, totalB = 0;
         for (uint k = 0; k < shape.z; k += 16) {
-          for (uint i = thread; i < 256; i += 64) {
+          for (uint i = localIndex; i < 256; i += 64) {
             uint r = i / 16, d = i % 16, source = gid.y * 16 + r;
             samples[r][d] = source < shape.x && k + d < shape.z
                 ? input[source * shape.z + k + d] : 0;
           }
-          for (uint i = thread; i < 512; i += 64) {
+          for (uint i = localIndex; i < 512; i += 64) {
             uint f = i / 16, d = i % 16, source = gid.x * 32 + f;
             filters[d][f] = source < shape.y && k + d < shape.z
                 ? weights[source * shape.z + k + d] : 0;
@@ -129,9 +129,14 @@ static BOOL prepare(void) {
       return;
     MTLCompileOptions *options = [MTLCompileOptions new];
     options.fastMathEnabled = NO;
+    NSError *compileError = nil;
     id<MTLLibrary> library = [device newLibraryWithSource:projectionSource
                                                   options:options
-                                                    error:NULL];
+                                                    error:&compileError];
+    if (!library) {
+      NSLog(@"flutter_onnx Metal shader compilation failed: %@", compileError);
+      return;
+    }
     id<MTLFunction> kernel = [library newFunctionWithName:@"project"];
     if (!kernel)
       return;
