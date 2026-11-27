@@ -52,7 +52,11 @@ jobs:
       - name: Compare Metal speech with ONNX Runtime CPU on the same Mac
         if: runner.os == 'macOS'
         run: |
-          SPEECH_METAL=1 "$RUNNER_TEMP/speech-cli/bundle/bin/supertonic_reference" --playback "$RUNNER_TEMP/playback" > "$RUNNER_TEMP/metal.log"
+          export SPEECH_METAL=1
+          for version in 2 3; do
+            "$RUNNER_TEMP/speech-cli/bundle/bin/supertonic_reference" "$RUNNER_TEMP/reference-$version"
+          done
+          "$RUNNER_TEMP/speech-cli/bundle/bin/supertonic_reference" --playback "$RUNNER_TEMP/playback" > "$RUNNER_TEMP/metal.log"
           cat "$RUNNER_TEMP/metal.log"
           python test/compare_speech.py "$RUNNER_TEMP/playback" "$RUNNER_TEMP/metal.log" "$RUNNER_TEMP/metal-comparison.json"
       - uses: actions/upload-artifact@v4

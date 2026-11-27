@@ -108,9 +108,9 @@ jobs:
             adb root
             adb wait-for-device
             for engine in onnxruntime flutter_onnx; do
-              adb install -r "$RUNNER_TEMP/$engine.apk"
+              adb install "$RUNNER_TEMP/$engine.apk"
               adb shell mkdir -p "$dir"
-              if [[ "$engine" == onnxruntime ]]; then adb push "$RUNNER_TEMP/model" "$dir/model"; fi
+              adb push "$RUNNER_TEMP/model" "$dir/model"
               uid=$(adb shell stat -c %u "/data/user/0/$app" | tr -d '\r')
               adb shell chown -R "$uid:$uid" "$dir"
               adb shell restorecon -RF "$dir"
@@ -120,6 +120,7 @@ jobs:
               adb pull "$dir/$engine.json" "$RUNNER_TEMP/$engine.json"
               cat "$RUNNER_TEMP/$engine.json"
               for i in 0 1 2; do adb pull "$dir/$engine-$i.f32" "$RUNNER_TEMP/$engine-$i.f32"; done
+              adb uninstall "$app"
             done
         with:
           api-level: 35

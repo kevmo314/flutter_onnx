@@ -17,7 +17,7 @@
 
 static id<MTLDevice> device;
 static id<MTLCommandQueue> queue;
-static id<MTLComputePipelineState> activation;
+static id<MTLComputePipelineState> activation, normalization;
 
 @interface OnnxMetalWorkspace : NSObject
 @property(nonatomic, strong) NSMutableArray<id<MTLBuffer>> *buffers;
@@ -39,11 +39,22 @@ static BOOL prepare(void) {
       " if(i>=shape.x*shape.y) return; float v=x[i]+bias[i%shape.y]; if (!shape.z) { x[i]=v; return; }"
       " float a=v/1.4142135381698608f, t=1.0f/(1.0f+0.3275911f*abs(a));"
       " float p=(((((1.061405429f*t-1.453152027f)*t)+1.421413741f)*t-0.284496736f)*t+0.254829592f)*t;"
-      " float e=copysign(1.0f-p*exp(-a*a),a); x[i]=(v*(1.0f+e))*0.5f;}";
+      " float e=copysign(1.0f-p*exp(-a*a),a); x[i]=(v*(1.0f+e))*0.5f;}"
+      "kernel void normalize(device float* x [[buffer(0)]],constant float* scale [[buffer(1)]],"
+      " constant float* bias [[buffer(2)]],constant uint& width [[buffer(3)]],constant float& eps [[buffer(4)]],"
+      " uint lane [[thread_index_in_simdgroup]],uint3 group [[threadgroup_position_in_grid]]) {"
+      " uint row=group.x*width; float total=0;"
+      " for(uint c=lane;c<width;c+=32) total+=x[row+c];"
+      " float mean=simd_sum(total)/float(width); total=0;"
+      " for(uint c=lane;c<width;c+=32){float d=x[row+c]-mean;total+=d*d;}"
+      " float inv=rsqrt(simd_sum(total)/float(width)+eps);"
+      " for(uint c=lane;c<width;c+=32)x[row+c]=(x[row+c]-mean)*inv*scale[c]+bias[c];}";
     MTLCompileOptions *options = [MTLCompileOptions new];
     options.fastMathEnabled = NO;
     id<MTLLibrary> library = [device newLibraryWithSource:code options:options error:NULL];
     id<MTLFunction> function = [library newFunctionWithName:@"activate"];
+    id<MTLFunction> norm = [library newFunctionWithName:@"normalize"];
+    if (norm) normalization = [device newComputePipelineStateWithFunction:norm error:NULL];
     if (function) activation = [device newComputePipelineStateWithFunction:function error:NULL];
   });
   return queue && activation;
@@ -117,8 +128,8 @@ static BOOL encode(id<MTLCommandBuffer> cmd, OnnxMetalProjection *p,
   return YES;
 }
 
-int onnx_metal_run(void *handle, void *next, const float *input, float *output,
-                   int batch, int width, int gelu) {
+int onnx_metal_normalized(void *handle, void *next, const float *input, float *output,
+                   int batch, int width, int gelu, const float *scale, const float *normBias, float epsilon) {
   @autoreleasepool {
     OnnxMetalProjection *p = (__bridge OnnxMetalProjection *)handle;
     OnnxMetalProjection *q = (__bridge OnnxMetalProjection *)next;
@@ -144,6 +155,20 @@ int onnx_metal_run(void *handle, void *next, const float *input, float *output,
     float *src = x.data.contents;
     for (int b=0; b<batch; ++b)
       vDSP_mtrans(input+b*inputSize,1,src+b*inputSize,1,width,p.inputs);
+    if (scale) {
+      if (!normalization || normalization.threadExecutionWidth != 32 || !normBias || p.inputs>1024) return 0;
+      id<MTLComputeCommandEncoder> pass = [cmd computeCommandEncoder];
+      if (!pass) return 0;
+      const uint32_t channels=(uint32_t)p.inputs;
+      [pass setComputePipelineState:normalization];
+      [pass setBuffer:x.data offset:0 atIndex:0];
+      [pass setBytes:scale length:channels*sizeof(float) atIndex:1];
+      [pass setBytes:normBias length:channels*sizeof(float) atIndex:2];
+      [pass setBytes:&channels length:sizeof(channels) atIndex:3];
+      [pass setBytes:&epsilon length:sizeof(epsilon) atIndex:4];
+      [pass dispatchThreadgroups:MTLSizeMake(rows,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+      [pass endEncoding];
+    }
     if (!encode(cmd,p,x,y,q || gelu) || (q && !encode(cmd,q,y,z,NO))) return 0;
     [cmd commit];
     [cmd waitUntilCompleted];
@@ -159,4 +184,10 @@ int onnx_metal_run(void *handle, void *next, const float *input, float *output,
     }
     return 1;
   }
+}
+
+
+int onnx_metal_run(void *first, void *second, const float *input, float *output,
+                   int batch, int width, int gelu) {
+  return onnx_metal_normalized(first,second,input,output,batch,width,gelu,NULL,NULL,0);
 }

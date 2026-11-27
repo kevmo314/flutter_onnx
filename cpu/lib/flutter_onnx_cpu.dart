@@ -260,6 +260,33 @@ external int _runMetal(
   int gelu,
 );
 
+@Native<
+  Int32 Function(
+    Pointer<Void>,
+    Pointer<Void>,
+    Pointer<Float>,
+    Pointer<Float>,
+    Int32,
+    Int32,
+    Int32,
+    Pointer<Float>,
+    Pointer<Float>,
+    Float,
+  )
+>(symbol: 'onnx_metal_normalized')
+external int _runMetalNormalized(
+  Pointer<Void> first,
+  Pointer<Void> second,
+  Pointer<Float> x,
+  Pointer<Float> y,
+  int batch,
+  int width,
+  int gelu,
+  Pointer<Float> scale,
+  Pointer<Float> normBias,
+  double epsilon,
+);
+
 class _DenseFilter implements Finalizable {
   static final _free = NativeFinalizer(
     Native.addressOf<NativeFunction<Void Function(Pointer<Void>)>>(
@@ -449,7 +476,18 @@ class NativeCpuBackend implements PointwisePairBackend {
     Tensor? firstBias,
     Tensor secondWeights,
     Tensor? secondBias,
-  ) async {
+  ) => _pair(input, firstWeights, firstBias, secondWeights, secondBias);
+
+  Future<Float32List?> _pair(
+    Tensor input,
+    Tensor firstWeights,
+    Tensor? firstBias,
+    Tensor secondWeights,
+    Tensor? secondBias, {
+    Tensor? scale,
+    Tensor? normBias,
+    double epsilon = 0,
+  }) async {
     if (!supportsPointwisePairs ||
         input.type != TensorType.float32 ||
         input.shape.length != 3)
@@ -492,7 +530,26 @@ class NativeCpuBackend implements PointwisePairBackend {
     return using((arena) {
       final x = arena<Float>(input.length), y = arena<Float>(frames * filters);
       x.asTypedList(input.length).setAll(0, input.values as Float32List);
-      final success = this is NativeMetalBackend
+      Pointer<Float> copy(Tensor t) {
+        final ptr = arena<Float>(t.length);
+        ptr.asTypedList(t.length).setAll(0, t.values as Float32List);
+        return ptr;
+      }
+
+      final success = scale != null && normBias != null
+          ? _runMetalNormalized(
+              first.handle,
+              second.handle,
+              x,
+              y,
+              batch,
+              width,
+              0,
+              copy(scale),
+              copy(normBias),
+              epsilon,
+            )
+          : this is NativeMetalBackend
           ? _runMetal(first.handle, second.handle, x, y, batch, width, 0)
           : _runDensePair(
               first.handle,
@@ -782,7 +839,41 @@ class NativeCpuBackend implements PointwisePairBackend {
 }
 
 /// Runs supported pointwise projections on Metal and other operations on CPU.
-class NativeMetalBackend extends NativeCpuBackend {
+class NativeMetalBackend extends NativeCpuBackend
+    implements NormalizedProjectionBackend {
+  @override
+  Future<Float32List?> normalizedPair(
+    Tensor input,
+    Tensor scale,
+    Tensor normBias,
+    double epsilon,
+    Tensor firstWeights,
+    Tensor? firstBias,
+    Tensor secondWeights,
+    Tensor? secondBias,
+  ) async {
+    if (!(Platform.isIOS || Platform.isMacOS) ||
+        input.shape.length != 3 ||
+        input.shape[1] > 1024 ||
+        [scale, normBias].any(
+          (v) =>
+              v.type != TensorType.float32 ||
+              v.shape.length != 1 ||
+              v.length != input.shape[1],
+        ))
+      return null;
+    return _pair(
+      input,
+      firstWeights,
+      firstBias,
+      secondWeights,
+      secondBias,
+      scale: scale,
+      normBias: normBias,
+      epsilon: epsilon,
+    );
+  }
+
   NativeMetalBackend({super.maxThreads});
   int _dispatches = 0;
 

@@ -109,6 +109,8 @@ class OnnxSession {
       _uses);
   late final List<_Node> _pairedNodes =
       _fusePointwisePairs(_channelwiseNodes, _weights, inputs, outputs, _uses);
+  late final List<_Node> _normalizedPairs =
+      _fuseNormalizedPairs(_pairedNodes, outputs, _uses);
   final Set<String> _captures;
   OnnxSession._(this.opset, this.inputs, this.outputs, this._weights,
       this._nodes, this._uses, this._captures);
@@ -237,15 +239,58 @@ class OnnxSession {
     if (backend == null) return run(feeds);
     final frame = _Frame(this, feeds, {});
     final plan =
-        backend is PointwisePairBackend && backend.supportsPointwisePairs
-            ? _pairedNodes
-            : backend is ChannelwiseBackend
-                ? _channelwiseNodes
-                : backend is PointwiseConvBackend
-                    ? _pointwiseNodes
-                    : _nodes;
+        backend is NormalizedProjectionBackend && backend.supportsPointwisePairs
+            ? _normalizedPairs
+            : backend is PointwisePairBackend && backend.supportsPointwisePairs
+                ? _pairedNodes
+                : backend is ChannelwiseBackend
+                    ? _channelwiseNodes
+                    : backend is PointwiseConvBackend
+                        ? _pointwiseNodes
+                        : _nodes;
     for (final node in plan) {
       final args = frame.args(node);
+      if (node.op == _normalizedPair) {
+        final norm = node.attrs['normalization'] as _Node;
+        final pair = node.attrs['projection'] as _Node;
+        final values = args.cast<Tensor?>();
+        final b = backend as NormalizedProjectionBackend;
+        final x = values[0]!, scale = values[1]!, bias = values[2]!;
+        final w1 = values[3]!, w2 = values[5]!;
+        final epsilon = norm.real('epsilon', 1e-5);
+        final result = await b.normalizedPair(
+            x, scale, bias, epsilon, w1, values[4], w2, values[6]);
+        if (result != null) {
+          final shape = [x.shape[0], w2.shape[0], x.shape[2]];
+          if (result.length != _size(shape))
+            throw StateError('Incorrect normalized projection length');
+          onAccelerated?.call(norm.label);
+          onAccelerated?.call(pair.attrs['first_label'] as String);
+          onAccelerated?.call(pair.label);
+          frame.store(
+              node, [Tensor._(x.type, shape, result.asUnmodifiableView())]);
+        } else {
+          final data = b.normalizeChannels(x, scale, bias, epsilon);
+          final Tensor normalized;
+          if (data != null) {
+            normalized = Tensor._(x.type, x.shape, data.asUnmodifiableView());
+            onAccelerated?.call(norm.label);
+          } else {
+            normalized = _transpose(
+                _normalize(norm, [
+                  _transpose(x, [0, 2, 1]),
+                  scale,
+                  bias
+                ]).first,
+                [0, 2, 1]);
+          }
+          frame.store(node, [
+            await _runPointwisePair(
+                pair, [normalized, ...values.skip(3)], b, onAccelerated)
+          ]);
+        }
+        continue;
+      }
       if (node.op == _pointwisePair) {
         final value = await _runPointwisePair(node, args.cast<Tensor?>(),
             backend as PointwisePairBackend, onAccelerated);
@@ -322,6 +367,52 @@ abstract interface class PointwisePairBackend implements ChannelwiseBackend {
   bool get supportsPointwisePairs;
   Future<Float32List?> pointwisePair(Tensor input, Tensor firstWeights,
       Tensor? firstBias, Tensor secondWeights, Tensor? secondBias);
+}
+
+/// Optional backend for a channel normalization feeding a pair of projections.
+abstract interface class NormalizedProjectionBackend
+    implements PointwisePairBackend {
+  Future<Float32List?> normalizedPair(
+      Tensor input,
+      Tensor scale,
+      Tensor normBias,
+      double epsilon,
+      Tensor firstWeights,
+      Tensor? firstBias,
+      Tensor secondWeights,
+      Tensor? secondBias);
+}
+
+const _normalizedPair = '#NormalizedPointwisePair';
+List<_Node> _fuseNormalizedPairs(
+    List<_Node> nodes, Map<String, TensorInfo> outputs, Map<String, int> uses) {
+  final norms = {
+    for (final n in nodes)
+      if (n.op == _channelNorm &&
+          n.inputs.length == 3 &&
+          n.inputs[2].isNotEmpty &&
+          uses[n.outputs.single] == 1 &&
+          !outputs.containsKey(n.outputs.single))
+        n.outputs.single: n
+  };
+  final removed = <_Node>{};
+  final pairs = <_Node, _Node>{};
+  for (final n in nodes) {
+    if (n.op != _pointwisePair) continue;
+    final norm = norms[n.inputs.first];
+    if (norm == null) continue;
+    removed.add(norm);
+    pairs[n] = _Node(
+        _normalizedPair,
+        n.label,
+        n.outputs,
+        [...norm.inputs, ...n.inputs.skip(1)],
+        {'normalization': norm, 'projection': n});
+  }
+  return [
+    for (final n in nodes)
+      if (!removed.contains(n)) pairs[n] ?? n
+  ];
 }
 
 const _pointwisePair = '#PointwisePair';
