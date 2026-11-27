@@ -400,8 +400,23 @@ EXPORT void onnx_pointwise_pack(const float *weights, const float *bias,
 typedef struct {
   const float *weights, *samples;
   float *output;
-  int channels, filters, width, frames, first, end, gelu;
+  int channels, filters, width, frames, first, end, gelu, packed_output;
 } product_job;
+
+// A fused expansion writes each frame tile in the contraction's input layout.
+static inline float *output_lane(const product_job *job, int filter, int frame,
+                                 int lane, int tile, int *stride) {
+  if (job->packed_output) {
+    *stride = tile;
+    return job->output + (size_t)frame * job->filters + (size_t)filter * tile +
+           lane;
+  }
+  const int time = frame + lane;
+  *stride = job->width;
+  return job->output +
+         ((size_t)(time / job->width) * job->filters + filter) * job->width +
+         time % job->width;
+}
 
 #if defined(__GNUC__) || defined(__clang__)
 typedef float panel_vector __attribute__((vector_size(64), aligned(4)));
@@ -423,12 +438,11 @@ static INLINE void compute(const product_job *job) {
           sum[t] += w * x[d * frames_per_tile + t];
       }
       for (int t = 0; t < frames_per_tile && frame + t < job->frames; ++t) {
-        const int b = (frame + t) / job->width, time = (frame + t) % job->width;
         const panel_vector v = sum[t] + panel[k];
-        float *dst =
-            job->output + ((size_t)b * job->filters + f) * job->width + time;
+        int stride;
+        float *dst = output_lane(job, f, frame, t, frames_per_tile, &stride);
         for (int j = 0; j < filters_per_tile; ++j)
-          dst[(size_t)j * job->width] = job->gelu ? expanded_gelu(v[j]) : v[j];
+          dst[(size_t)j * stride] = job->gelu ? expanded_gelu(v[j]) : v[j];
       }
     }
   }
@@ -443,7 +457,8 @@ enum { wide_frames = 12 };
 #if defined(__GNUC__) && !defined(__clang__)
 __attribute__((optimize("fp-contract=off")))
 #endif
-__attribute__((target("avx512f"))) static void compute_wide(const product_job *job) {
+__attribute__((target("avx512f"))) static void
+compute_wide(const product_job *job) {
 #if defined(__clang__)
 #pragma clang fp contract(off)
 #endif
@@ -458,7 +473,8 @@ __attribute__((target("avx512f"))) static void compute_wide(const product_job *j
       for (int d = 0; d < k; ++d) {
         const float *w = a + (size_t)d * filters_per_tile;
         const __m512 left = _mm512_loadu_ps(w);
-        const __m512 right = pair ? _mm512_loadu_ps(w + panel_size) : _mm512_setzero_ps();
+        const __m512 right =
+            pair ? _mm512_loadu_ps(w + panel_size) : _mm512_setzero_ps();
 #pragma GCC unroll 12
         for (int t = 0; t < wide_frames; ++t) {
           const __m512 sample = _mm512_set1_ps(x[(size_t)d * wide_frames + t]);
@@ -468,14 +484,17 @@ __attribute__((target("avx512f"))) static void compute_wide(const product_job *j
       }
       const int count = pair ? 2 : 1;
       for (int part = 0; part < count; ++part) {
-        const __m512 bias = _mm512_loadu_ps(a + (size_t)k * filters_per_tile + part * panel_size);
+        const __m512 bias = _mm512_loadu_ps(a + (size_t)k * filters_per_tile +
+                                            part * panel_size);
         for (int t = 0; t < wide_frames && frame + t < job->frames; ++t) {
-          const int b = (frame + t) / job->width, time = (frame + t) % job->width;
+          int stride;
           float values[filters_per_tile];
           _mm512_storeu_ps(values, _mm512_add_ps(part ? hi[t] : lo[t], bias));
-          float *dst = job->output + ((size_t)b * job->filters + f + part * filters_per_tile) * job->width + time;
+          float *dst = output_lane(job, f + part * filters_per_tile, frame, t,
+                                   wide_frames, &stride);
           for (int j = 0; j < filters_per_tile; ++j)
-            dst[(size_t)j * job->width] = job->gelu ? expanded_gelu(values[j]) : values[j];
+            dst[(size_t)j * stride] =
+                job->gelu ? expanded_gelu(values[j]) : values[j];
         }
       }
     }
@@ -501,6 +520,68 @@ static void *run_job(void *arg) {
   return NULL;
 }
 #endif
+#endif
+
+#if defined(__linux__) && (defined(__GNUC__) || defined(__clang__))
+static int frame_tile(void) {
+  int packing = frames_per_tile;
+#if defined(__x86_64__)
+  if (__builtin_cpu_supports("avx512f"))
+    packing = wide_frames;
+#endif
+  return packing;
+}
+
+static float *pack_samples(const float *x, int frames, int channels, int width,
+                           int packing) {
+  const size_t padded = ((size_t)frames + packing - 1) / packing * packing;
+  float *packed = malloc(padded * channels * sizeof(float));
+  if (!packed)
+    return NULL;
+  for (int frame = 0; frame < frames; frame += packing) {
+    const float *row[12];
+    for (int t = 0; t < packing; ++t) {
+      const int p = frame + t;
+      row[t] = p < frames
+                   ? x + (size_t)(p / width) * channels * width + p % width
+                   : NULL;
+    }
+    float *dst = packed + (size_t)frame * channels;
+    for (int c = 0; c < channels; ++c)
+      for (int t = 0; t < packing; ++t)
+        dst[c * packing + t] = row[t] ? row[t][(size_t)c * width] : 0;
+  }
+  return packed;
+}
+
+static void project(const float *weights, const float *packed, float *y,
+                    int channels, int filters, int width, int frames, int gelu,
+                    int threads, int packed_output) {
+  const int tiles = filters / filters_per_tile;
+  if (threads > tiles)
+    threads = tiles;
+  if (threads > max_workers)
+    threads = max_workers;
+  pthread_t workers[max_workers];
+  product_job jobs[max_workers];
+  int started[max_workers] = {0};
+  int first = 0;
+  for (int i = 0; i < threads; ++i) {
+    const int end =
+        (int)((int64_t)tiles * (i + 1) / threads) * filters_per_tile;
+    jobs[i] = (product_job){weights, packed, y,   channels, filters,      width,
+                            frames,  first,  end, gelu,     packed_output};
+    first = end;
+    if (i + 1 < threads &&
+        pthread_create(&workers[i], NULL, run_job, &jobs[i]) == 0)
+      started[i] = 1;
+    else
+      run_job(&jobs[i]);
+  }
+  for (int i = 0; i < threads; ++i)
+    if (started[i])
+      pthread_join(workers[i], NULL);
+}
 #endif
 
 EXPORT int onnx_pointwise_run(const float *x, const float *weights, float *y,
@@ -554,54 +635,10 @@ EXPORT int onnx_pointwise_run(const float *x, const float *weights, float *y,
   if (!direct)
     free(product);
 #elif defined(__linux__) && (defined(__GNUC__) || defined(__clang__))
-  int packing = frames_per_tile;
-#if defined(__x86_64__)
-  if (__builtin_cpu_supports("avx512f"))
-    packing = wide_frames;
-#endif
   const int frames = batch * width;
-  const size_t padded = ((size_t)frames + packing - 1) /
-                        packing * packing;
-  float *packed = malloc(padded * channels * sizeof(float));
-  if (!packed)
-    return 0;
-  for (int frame = 0; frame < frames; frame += packing) {
-    const float *row[12];
-    for (int t = 0; t < packing; ++t) {
-      const int p = frame + t;
-      row[t] = p < frames
-                   ? x + (size_t)(p / width) * channels * width + p % width
-                   : NULL;
-    }
-    float *dst = packed + (size_t)frame * channels;
-    for (int c = 0; c < channels; ++c)
-      for (int t = 0; t < packing; ++t)
-        dst[c * packing + t] = row[t] ? row[t][(size_t)c * width] : 0;
-  }
-  const int tiles = filters / filters_per_tile;
-  if (threads > tiles)
-    threads = tiles;
-  if (threads > max_workers)
-    threads = max_workers;
-  pthread_t workers[max_workers];
-  product_job jobs[max_workers];
-  int started[max_workers] = {0};
-  int first = 0;
-  for (int i = 0; i < threads; ++i) {
-    const int end =
-        (int)((int64_t)tiles * (i + 1) / threads) * filters_per_tile;
-    jobs[i] = (product_job){weights, packed, y,     channels, filters,
-                            width,   frames, first, end,      gelu};
-    first = end;
-    if (i + 1 < threads &&
-        pthread_create(&workers[i], NULL, run_job, &jobs[i]) == 0)
-      started[i] = 1;
-    else
-      run_job(&jobs[i]);
-  }
-  for (int i = 0; i < threads; ++i)
-    if (started[i])
-      pthread_join(workers[i], NULL);
+  float *packed = pack_samples(x, frames, channels, width, frame_tile());
+  if (!packed) return 0;
+  project(weights, packed, y, channels, filters, width, frames, gelu, threads, 0);
   free(packed);
 #else
   return 0;
@@ -610,4 +647,37 @@ EXPORT int onnx_pointwise_run(const float *x, const float *weights, float *y,
     memcpy(y + (size_t)filters * width, y,
            (size_t)filters * width * sizeof(float));
   return 1;
+}
+
+EXPORT int onnx_packed_pair(const float *input, const float *first,
+                            const float *second, float *output, int batch,
+                            int channels, int width, int hidden, int filters,
+                            int threads) {
+#if defined(__linux__) && (defined(__GNUC__) || defined(__clang__))
+  const size_t input_size = (size_t)channels * width * sizeof(float);
+  const int repeated =
+      batch == 2 &&
+      !memcmp(input, input + (size_t)channels * width, input_size);
+  const int frames = (repeated ? 1 : batch) * width;
+  const int tile = frame_tile();
+  const size_t padded = ((size_t)frames + tile - 1) / tile * tile;
+  float *samples = pack_samples(input, frames, channels, width, tile);
+  float *middle = calloc(padded * hidden, sizeof(float));
+  if (samples && middle) {
+    project(first, samples, middle, channels, hidden, width, frames, 1, threads,
+            1);
+    project(second, middle, output, hidden, filters, width, frames, 0, threads,
+            0);
+    if (repeated) {
+      size_t n = (size_t)filters * width;
+      memcpy(output + n, output, n * sizeof(float));
+    }
+  }
+  const int success = samples && middle;
+  free(samples);
+  free(middle);
+  return success;
+#else
+  return 0;
+#endif
 }

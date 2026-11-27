@@ -1,5 +1,9 @@
 name: Platform inference
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -66,6 +70,25 @@ jobs:
             ${{ runner.temp }}/playback.log
             ${{ runner.temp }}/engine-comparison.json
             ${{ runner.temp }}/metal-comparison.json
+  browsers:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, browser: firefox}
+          - {os: windows-latest, browser: edge}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+      - uses: browser-actions/setup-firefox@v1
+        if: matrix.browser == 'firefox'
+        with:
+          firefox-version: latest
+      - run: dart pub get
+      - run: dart test -p ${{ matrix.browser }}
+        env:
+          MOZ_HEADLESS: '1'
   web:
     runs-on: ubuntu-latest
     steps:

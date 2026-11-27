@@ -246,7 +246,7 @@ void main() {
     },
   );
 
-  test('paired Apple projections agree with two independent calls', () async {
+  test('paired native projections agree with two independent calls', () async {
     if (!backend.supportsPointwisePairs) return;
     const channels = 128, hidden = 1024, filters = 128, width = 13;
     final w1 = Tensor.float32([

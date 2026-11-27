@@ -61,6 +61,11 @@ jobs:
         working-directory: rtchat
         run: |
           set -euo pipefail
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            keytool -genkeypair -alias benchmark -keyalg RSA -keysize 2048 -validity 2 \
+              -keystore "$RUNNER_TEMP/benchmark.p12" -storepass benchmark -dname CN=Benchmark
+            signer=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
+          fi
           for engine in onnxruntime flutter_onnx; do
             if [[ "$engine" == onnxruntime ]]; then
               git checkout --detach 44fc55c6c246488500517b0527f149e88c02b24f
@@ -87,7 +92,8 @@ jobs:
             flutter pub get
             if [[ "$RUNNER_OS" == Linux ]]; then
               flutter build apk --profile --target-platform android-x64 -t integration_test/benchmark.dart --dart-define=BENCHMARK_ENGINE="$engine"
-              cp build/app/outputs/flutter-apk/app-profile.apk "$RUNNER_TEMP/$engine.apk"
+              "$signer" sign --ks "$RUNNER_TEMP/benchmark.p12" --ks-pass pass:benchmark \
+                --out "$RUNNER_TEMP/$engine.apk" build/app/outputs/flutter-apk/app-profile.apk
             else
               flutter build ios --simulator --debug -t integration_test/benchmark.dart --dart-define=BENCHMARK_ENGINE="$engine"
               cp -R build/ios/iphonesimulator/Runner.app "$RUNNER_TEMP/$engine.app"
@@ -110,25 +116,26 @@ jobs:
             adb root
             adb wait-for-device
             for engine in onnxruntime flutter_onnx; do
-              adb install "$RUNNER_TEMP/$engine.apk"
+              adb install -r "$RUNNER_TEMP/$engine.apk"
               adb shell mkdir -p "$dir"
-              adb push "$RUNNER_TEMP/model" "$dir/model"
+              if [[ "$engine" == onnxruntime ]]; then adb push "$RUNNER_TEMP/model" "$dir/model"; fi
               uid=$(adb shell stat -c %u "/data/user/0/$app" | tr -d '\r')
               adb shell chown -R "$uid:$uid" "$dir"
               adb shell restorecon -RF "$dir"
+              adb shell ls -l "$dir/model/onnx/tts.json"
               adb shell am force-stop "$app"
               adb shell am start -n "$app/.MainActivity"
               for ((i=0;i<180;i++)); do adb shell ls "$dir/$engine.json" >/dev/null 2>&1 && break; sleep 5; done
               adb pull "$dir/$engine.json" "$RUNNER_TEMP/$engine.json"
               cat "$RUNNER_TEMP/$engine.json"
               for i in 0 1 2; do adb pull "$dir/$engine-$i.f32" "$RUNNER_TEMP/$engine-$i.f32"; done
-              adb uninstall "$app"
             done
         with:
           api-level: 35
           arch: x86_64
           target: google_apis
           ram-size: 4096M
+          disk-size: 8192M
           script: bash -c "$PROFILE"
       - name: Measure both apps on one iPhone simulator
         if: runner.os == 'macOS'
