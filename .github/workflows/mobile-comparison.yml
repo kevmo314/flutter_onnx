@@ -91,6 +91,15 @@ jobs:
             cp ../cpu/test/mobile/benchmark.dart.template integration_test/benchmark.dart
             flutter pub get
             if [[ "$RUNNER_OS" == Linux ]]; then
+              # RTChat derives its release version code from the clock. Keep the
+              # two test APKs mutually installable when the order reverses.
+              python - <<'PYTHON'
+          from pathlib import Path
+          p = Path('android/app/build.gradle')
+          gradle = p.read_text()
+          assert gradle.count('versionCode = vcode') == 1
+          p.write_text(gradle.replace('versionCode = vcode', 'versionCode = 1'))
+          PYTHON
               flutter build apk --profile --target-platform android-x64 -t integration_test/benchmark.dart --dart-define=BENCHMARK_ENGINE="$engine"
               "$signer" sign --ks "$RUNNER_TEMP/benchmark.p12" --ks-pass pass:benchmark \
                 --out "$RUNNER_TEMP/$engine.apk" build/app/outputs/flutter-apk/app-profile.apk
