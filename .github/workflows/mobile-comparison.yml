@@ -11,15 +11,15 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: rtchat-mobile-profile-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
 jobs:
   profile:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-26]
+    concurrency:
+      group: rtchat-mobile-profile-${{ matrix.os }}-${{ github.head_ref || github.ref_name }}
+      cancel-in-progress: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
