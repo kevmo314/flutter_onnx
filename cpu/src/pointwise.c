@@ -440,7 +440,13 @@ enum { wide_frames = 12 };
 
 // Two output panels share each broadcast input. The 24 accumulators fit in
 // AVX-512 registers and cover twelve frames before reading the next weights.
-__attribute__((target("avx512f,fma"))) static void compute_wide(const product_job *job) {
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("fp-contract=off")))
+#endif
+__attribute__((target("avx512f"))) static void compute_wide(const product_job *job) {
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
   const int k = job->channels;
   const size_t panel_size = (size_t)(k + 1) * filters_per_tile;
   for (int f = job->first; f < job->end; f += 2 * filters_per_tile) {
@@ -456,8 +462,8 @@ __attribute__((target("avx512f,fma"))) static void compute_wide(const product_jo
 #pragma GCC unroll 12
         for (int t = 0; t < wide_frames; ++t) {
           const __m512 sample = _mm512_set1_ps(x[(size_t)d * wide_frames + t]);
-          lo[t] = _mm512_fmadd_ps(left, sample, lo[t]);
-          hi[t] = _mm512_fmadd_ps(right, sample, hi[t]);
+          lo[t] = _mm512_add_ps(lo[t], _mm512_mul_ps(left, sample));
+          hi[t] = _mm512_add_ps(hi[t], _mm512_mul_ps(right, sample));
         }
       }
       const int count = pair ? 2 : 1;
@@ -482,7 +488,7 @@ __attribute__((target("avx"))) static void compute_avx(const product_job *job) {
 #endif
 static void *run_job(void *arg) {
 #if defined(__x86_64__)
-  if (__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("fma")) {
+  if (__builtin_cpu_supports("avx512f")) {
     compute_wide(arg);
     return NULL;
   }
@@ -550,7 +556,7 @@ EXPORT int onnx_pointwise_run(const float *x, const float *weights, float *y,
 #elif defined(__linux__) && (defined(__GNUC__) || defined(__clang__))
   int packing = frames_per_tile;
 #if defined(__x86_64__)
-  if (__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("fma"))
+  if (__builtin_cpu_supports("avx512f"))
     packing = wide_frames;
 #endif
   const int frames = batch * width;
